@@ -33,6 +33,7 @@ export const HELP_GROUPS: HelpGroup[] = [
       { verb: 'init', summary: 'Scaffold guardrail.config.yaml + auto-detect migrate stack (writes .autopilot/stack.md)' },
       { verb: 'setup', summary: 'Auto-detect stack, write config, install pre-push hook' },
       { verb: 'scaffold', summary: 'Scaffold project skeleton from a spec markdown (--from-spec <path> [--stack node|python|fastapi|go|rust])' },
+      { verb: 'examples', summary: 'Print sample specs for each supported stack (use as starter templates for `scaffold --from-spec`)' },
       { verb: 'autopilot', summary: 'Multi-phase orchestrator — run scan → spec → plan → implement under one runId (v6.2.0)' },
       { verb: 'brainstorm', summary: 'Pipeline entry point (Claude Code skill — see /brainstorm)' },
       { verb: 'spec', summary: 'Spec-writing pointer (Claude Code skill — see /brainstorm)' },
@@ -218,6 +219,18 @@ export const HELP_OPTIONS: Record<string, string> = {
     claude-autopilot autopilot
     claude-autopilot autopilot --budget 25
     claude-autopilot autopilot --phases=scan,spec,plan`,
+  examples: `Options (examples):
+  [<stack>]            Optional: print only the spec for one stack (node|python|fastapi|go|rust)
+                       With no arg, lists all supported stacks with a 5-line preview each.
+
+  Behavior: read-only. Reads bundled spec files from the package's
+            \`examples/specs/\` directory and prints them to stdout. Pipe
+            to a file to use as a starter template:
+
+              claude-autopilot examples node > docs/specs/my-feature.md
+              claude-autopilot scaffold --from-spec docs/specs/my-feature.md
+
+  Exit codes: 0 success, 1 unknown stack id or missing bundled file.`,
   dashboard: `Options (dashboard):
   login                Open browser, mint API key via loopback callback
   logout               Revoke server-side, delete local config

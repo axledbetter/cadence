@@ -233,7 +233,7 @@ These are aliases for the flat subcommands; they still work without the 'advance
 // gc, delete, doctor) are dispatched inside its case block. The singular
 // `run resume` form is handled BEFORE the default `run` -> review dispatch
 // kicks in (see disambiguation block just below).
-const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'internal', 'help', '--help', '-h'] as const;
+const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'examples', 'internal', 'help', '--help', '-h'] as const;
 const VALUE_FLAGS = ['base', 'config', 'files', 'format', 'output', 'debounce', 'ask', 'focus', 'fail-on', 'note', 'reason', 'expires', 'profile', 'severity', 'prompt', 'context-file', 'path', 'adapter', 'ref', 'sha', 'spec', 'context', 'mode', 'phases', 'budget', 'stack'];
 
 // Bare invocation — no subcommand, no flags → show welcome guide
@@ -1104,6 +1104,18 @@ switch (subcommand) {
       ...(stackArg ? { stack: stackArg as 'node' | 'python' | 'fastapi' | 'go' | 'rust' } : {}),
     });
     process.exit(0);
+    break;
+  }
+
+  case 'examples': {
+    // v7.7.1 — `claude-autopilot examples [<stack>]`. Bridges the
+    // discoverability gap between `setup` and `scaffold --from-spec` —
+    // new users don't know what a spec looks like. Optional positional
+    // arg selects a single stack; no arg lists all five.
+    const { runExamples } = await import('./examples.ts');
+    const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+    const code = runExamples(target);
+    process.exit(code);
     break;
   }
 
