@@ -17,8 +17,11 @@ claude-autopilot brainstorm "add SSO with SAML for enterprise tenants"
 # → writes spec (reviewed by Codex) → writes plan (reviewed by Codex) →
 # → creates branch → implements with subagents → runs migrations →
 # → runs full test + lint + type + security gate → opens PR →
-# → dispatches multi-model review → auto-fixes bugbot findings →
-# → ready to merge
+# → runs risk-tiered Codex PR review (1/2/3 passes by spec risk) →
+# → triages bugbot findings, auto-fixes real bugs, re-runs validate →
+# → merges with your configured permissions (default is admin-squash;
+#   configure branch protection + required checks if you need to enforce
+#   reviews/CI gates that the autopilot agent should not bypass)
 ```
 
 *No hosted agent. No per-seat subscription. Runs locally on your machine, against your real repo, using your API keys. Every phase is a Claude Code skill you can intervene in, rewire, or run by itself.*
@@ -50,13 +53,14 @@ Every finding came with a concrete remediation (often a code patch or named libr
 | **Cursor BugBot / CodeRabbit** | Hosted | Per-PR or seat | Vendor's model | Review only | Post-hoc |
 | **Aider / Cline** | Local CLI | Free + your API key | User's choice | None | Continuous |
 | **OpenHands / SWE-agent** | Local research | Free | User's choice | Agent decides | Rare |
-| **claude-autopilot** | **Local CLI, your repo** | **Free + your existing Claude subscription** | **Multi-model per role (Claude + Codex + Gemini)** | **Skill-per-phase, rewireable** | **Every phase, all state on disk** |
+| **claude-autopilot** | **Local CLI, your repo** | **Open source CLI + your model/API costs (Claude / Codex / Gemini / Groq / Ollama-local)** | **Multi-model per role (Claude + Codex + Gemini)** | **Skill-per-phase, rewireable** | **Every phase, all state on disk** |
 
-Three things only this product gives you:
+Four things only this product gives you:
 
-1. **Multi-model council.** Same design question goes to Claude + Codex + Gemini in parallel; a fourth model synthesizes the consensus. Different blind spots, different recommendations, one merged answer. **No other tool dispatches multi-model on a per-decision basis.**
-2. **Your code never leaves your machine.** No cloud sandbox. No SaaS markup. The `git push` that happens at the end is from your laptop. For private repos, regulated industries, or anyone who doesn't want their unfinished code on someone else's servers — this is the only autonomous-agent shape that fits.
+1. **No hosted workspace or remote sandbox.** Your repo stays on your machine. No third-party agent runtime, no SaaS-side orchestration, no per-seat markup. Model prompts (diffs, file context, design questions) are sent to whichever LLM providers you've configured (Anthropic / OpenAI / Google / Groq / Ollama-local). For a truly local-only setup, you must point _every_ model used by the entire execution path at a local endpoint: that includes the Claude Code agent runtime itself (configure a local Claude Code provider) AND the autopilot review adapter (`openai-compatible` pointed at Ollama). Pointing only the review adapter at Ollama still ships prompts/diffs to Anthropic via Claude Code. For most teams, local-only isn't the goal; "no hosted orchestration + your existing provider keys" is.
+2. **Risk-tiered review depth (policy-driven).** Specs declare `risk: low | medium | high` in frontmatter. The autopilot skill runs 1 / 2 / 3 sequential Codex passes accordingly, each with a remediation cycle in between. Enforcement is encoded in the skill (an LLM-driven instruction set, not a hard CLI gate) so it's auditable and editable: read `.claude/skills/autopilot/SKILL.md`, swap the tier rules for your codebase, expand the auto-escalation keyword list. Designed for teams that want review depth to scale with change risk instead of running forensic-grade review on every typo.
 3. **Ships as a Claude Code skill, not a competing IDE.** `/brainstorm`, `/autopilot`, `/migrate`, `/validate` are first-class Claude Code commands. As Claude Code grows, autopilot rides that adoption. You don't switch tools to use it; it's already there.
+4. **Multi-model council, available as a verb.** `claude-autopilot council` dispatches the same diff or design question to Claude + Codex + Gemini in parallel and synthesizes the consensus. Wire it into the autopilot pipeline by editing `.claude/skills/autopilot/SKILL.md` Step 7, or invoke standalone for one-off design decisions. The default pipeline uses sequential Codex review (cheaper, faster, often sufficient for routine changes); council is the higher-rigor option when you want broader model diversity.
 
 Plus the four practical differences:
 
@@ -128,9 +132,9 @@ Each phase is a Claude Code skill (`.claude/skills/<name>/SKILL.md`). You can in
 | **Migrate** | `migrate` | Dispatches to the configured migration skill (see [Migrate phase](#migrate-phase)) — runs your migration tool dev → QA → prod with per-env validation | Deterministic |
 | **Validate** | `validate` | Static rules + tests + type check + security scan + LLM review | Any |
 | **PR** | `commit-push-pr` | Opens the PR with auto-generated title, summary, and test plan | Claude |
-| **Review** | `review-2pass` / `council` | Multi-model review of the diff (critical pass + informational pass) | Multiple |
+| **Review** | `codex-pr-review` (default) or `council` (opt-in) | Sequential Codex pass on the diff with risk-tiered iteration count (1/2/3 passes for low/medium/high). Swap in `council` for parallel multi-model dispatch if you want higher rigor. | Codex (default) or multi-model |
 | **Triage** | `bugbot` | Fetches automated reviewer findings, auto-fixes real bugs, dismisses false positives | Claude |
-| **Deploy** | `deploy` | Deploys via configured adapter (`vercel` \| `fly` \| `render` \| `generic`) with optional log streaming, health check, and bounded auto-rollback (see [Deploy phase](#deploy-phase)) | Deterministic |
+| **Deploy** (opt-in) | `deploy` | Deploys via configured adapter (`vercel` \| `fly` \| `render` \| `generic`) with optional log streaming, health check, and bounded auto-rollback (see [Deploy phase](#deploy-phase)). Not on the default `/autopilot` critical path: the autopilot loop ends at merge, and your CI/CD handles prod. Invoke `claude-autopilot deploy` directly, or wire it into the autopilot skill as Step 10. | Deterministic |
 
 ### Migrate phase
 
@@ -181,11 +185,13 @@ deploy:
 
 Features that are hard or impossible to find in the competitive set:
 
-- **Multi-model council review** — dispatch the same diff to 3+ models in parallel, synthesize agreement. Catches blind spots no single model sees.
-- **Fix with test verification** — `claude-autopilot fix` runs your full test suite after every patch and reverts on failure. Safer than any tool that proposes fixes without running your tests.
-- **Bug-bot auto-triage** — watches Cursor BugBot / Copilot comments on your PR, triages each (real bug vs false positive), auto-fixes confirmed bugs, dismisses noise with explanations.
-- **Schema alignment rule** — ensures DB migrations, backend types, and frontend types stay in sync. Custom static rule, not something any competitor ships.
-- **SARIF output + GitHub Code Scanning integration** — findings appear as annotations in the PR and in the Security tab.
+- **Risk-tiered review depth (policy-driven).** Specs are tagged `risk: low | medium | high` in their frontmatter, with auto-escalation by keyword detection for sensitive categories (auth, multi-tenancy, sandboxing, billing, secrets, migrations, RLS, deploy/IAM, vector-DB tenancy — extend the list in the skill for your codebase). The pipeline runs 1 / 2 / 3 sequential Codex passes accordingly, each with a remediation cycle in between. Enforcement is encoded in `.claude/skills/autopilot/SKILL.md` (LLM-driven instructions, not a hard CLI gate), so it's auditable and editable. For teams that need hard enforcement, gate the merge step on the configured pass count by extending the skill or wrapping the CLI.
+- **Retry-loop sameness detector.** Validate / Codex / bugbot retry loops compute a failure fingerprint before consuming each retry. If the same fingerprint fires twice in a row, the pipeline halts and surfaces it to you — instead of burning the remaining retry budget on attempts that are making no progress. Available as a public subpath import (`@delegance/claude-autopilot/run-state/sameness-detector`) for embedding into your own retry loops.
+- **Multi-model council, available as a verb.** `claude-autopilot council` dispatches the same prompt to 3+ models in parallel and synthesizes the consensus. Opt-in for the autopilot pipeline (wire it into Step 7 of the autopilot skill), or invoke standalone for design decisions and architecture questions.
+- **Fix with test verification.** `claude-autopilot fix --verify` runs your full test suite after every patch and reverts on failure. Safer than any tool that proposes fixes without running your tests.
+- **Bug-bot auto-triage.** Watches Cursor BugBot / Copilot comments on your PR, triages each (real bug vs false positive), auto-fixes confirmed bugs, dismisses noise with explanations.
+- **Schema alignment rule.** Ensures DB migrations, backend types, and frontend types stay in sync. Custom static rule, not something any competitor ships.
+- **SARIF output + GitHub Code Scanning integration.** Findings appear as annotations in the PR and in the Security tab.
 
 ## Just the review layer
 
