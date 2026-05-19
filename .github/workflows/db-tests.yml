@@ -35,7 +35,7 @@ jobs:
       - name: Install Supabase CLI
         # Official action: installs the supabase binary to PATH (npm install -g
         # supabase doesn't actually expose the binary on most CI images).
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v2
         with:
           version: latest
 
