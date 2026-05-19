@@ -25,7 +25,8 @@ The scaffolder auto-classifies as FastAPI when prose mentions
 ## How to use
 
 ```bash
-claude-autopilot scaffold --from-spec examples/specs/fastapi.md
+claude-autopilot examples fastapi > spec.md
+claude-autopilot scaffold --from-spec spec.md
 python -m pip install -e .
 pytest
 uvicorn tasks_api.main:app --reload

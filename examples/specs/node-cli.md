@@ -25,7 +25,8 @@ in `claude-autopilot scaffold --from-spec`.
 ## How to use
 
 ```bash
-claude-autopilot scaffold --from-spec examples/specs/node-cli.md
+claude-autopilot examples node > spec.md
+claude-autopilot scaffold --from-spec spec.md
 npm test
 ```
 
