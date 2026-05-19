@@ -2,6 +2,35 @@
 
 - v5.6 Phase 7 (docs reconciliation) — pending.
 
+## 7.10.1 — 2026-05-13
+
+**v7.10.1 — `examples` verb.** Patch release. Closes the discoverability
+gap a new user hits between `setup` and `scaffold --from-spec`: the
+new `claude-autopilot examples` verb prints sample specs for each
+supported stack (node / python / fastapi / go / rust) so an operator
+can pipe one to a file and feed it back into the scaffolder.
+
+**New:** `claude-autopilot examples` lists all five stacks with a
+5-line preview. `claude-autopilot examples <stack>` prints the full
+spec for one stack to stdout — pipe-friendly:
+
+```bash
+claude-autopilot examples fastapi > docs/specs/my-api.md
+# edit the spec...
+claude-autopilot scaffold --from-spec docs/specs/my-api.md
+```
+
+**Bundled examples.** Five spec markdown files ship in
+`examples/specs/{node-cli,python-cli,fastapi,go-cli,rust-cli}.md` —
+one per supported scaffold target. Each shows the `## Files` section
+shape the scaffolder reads, plus a `## Goal` and `## How to use`
+section for human readers.
+
+**Package shape.** `examples/` is added to the published `files:`
+array in package.json so the directory ships in the npm tarball — the
+verb resolves spec paths via `findPackageRoot` and works under both
+source and globally installed CLI invocations.
+
 ## 7.10.0 — 2026-05-13
 
 ### Added
@@ -91,7 +120,6 @@ usage except for the bundled `tsx` deprecation warning.
   A1-A8 covering ESM/CJS safety, CLI parser scope, PATH self-pointer,
   AST audit, type-only imports, hand-rolled PATH lookup dropping the
   `which` dep, XDG state dir, npm-only --omit=optional documentation).
-
 ## 7.7.0 (2026-05-11)
 
 **v7.7.0 — Rust scaffold support.** Minor release. Promotes Rust from

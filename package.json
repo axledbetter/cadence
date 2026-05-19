@@ -1,6 +1,6 @@
 {
   "name": "@delegance/claude-autopilot",
-  "version": "7.10.0",
+  "version": "7.10.1",
   "type": "module",
   "publishConfig": {
     "tag": "next"
@@ -62,6 +62,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.json",
+    "examples/",
     "presets/",
     "skills/",
     "scripts/test-runner.mjs",
