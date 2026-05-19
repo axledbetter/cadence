@@ -202,9 +202,9 @@ through, or the credibility loss is catastrophic.
 
 4. **Check npm view output.**
    ```bash
-   npm view @delegance/claude-autopilot dist.unpackedSize dist.fileCount version
+   npm view @delegance/claude-autopilot version dist-tags.latest dist.unpackedSize dist.fileCount
    ```
-   Confirm `version` is `7.10.0` and `dist.tag.latest` is `7.10.0`.
+   Confirm `version` is `7.10.0` and `dist-tags.latest` is `7.10.0`.
    If anything else is `latest`, abort and fix the publish before
    posting.
 
@@ -218,6 +218,18 @@ through, or the credibility loss is catastrophic.
    command (see `docs/launch/topics.md` or session notes) before
    posting — HN traffic will hit the GitHub repo, topics drive
    GitHub search discovery in the hours after launch.
+
+6. **Pin benchmark evidence to an immutable artifact.**
+   The post cites "13/13 in 38s for $0.21" (benchmark) and "12 min,
+   $2.20" (DEMO). Those link to mutable `master` paths today. Before
+   posting, capture a freshly run benchmark to a committed file —
+   suggested `docs/benchmarks/v7.10.0.md` — with package version,
+   git commit SHA, model name + provider, exact command, elapsed
+   time, cost source (provider billing console vs `--json` token
+   counts), and raw output summary. Update the HN draft to link
+   that file. If you skip this step, be prepared to be challenged
+   on the numbers in the comments — have the raw run output
+   stashed locally and be ready to paste.
 
 ---
 
