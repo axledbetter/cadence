@@ -91,7 +91,7 @@ jobs:
         # workflow artifacts so a triage engineer can replay the
         # failure without re-running the workflow."
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: adapter-cert-${{ github.run_id }}
           # Narrow glob — only the two artifact kinds the harness is
