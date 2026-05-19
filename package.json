@@ -15,7 +15,17 @@
     "llm",
     "sarif",
     "cli",
-    "pipeline"
+    "pipeline",
+    "coding-agent",
+    "devin-alternative",
+    "cursor-alternative",
+    "autonomous-coding",
+    "multi-model",
+    "codex",
+    "mit-license",
+    "local-first",
+    "developer-tools",
+    "ci-cd"
   ],
   "license": "MIT",
   "workspaces": [
