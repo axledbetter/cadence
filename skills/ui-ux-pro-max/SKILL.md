@@ -74,10 +74,10 @@ For every interactive component, check: default, hover, focus, active, disabled,
 A severity-sorted list shaped like this:
 
 ```
-[blocker] Inputs are rendered without associated <label> — WCAG 1.3.1 violation — app/portal/quotes/new/info/page.tsx:3486
-[major] "Application Progress" denominator counts optional fields; misleads users about completion — sidebar line 5049
-[major] Yes/No buttons (px-6 py-3) are 44px tall next to 32px select inputs — violates consistency heuristic — acord-question-bridge.tsx:67
-[minor] "Auto-filled" + "Suggested" chips render simultaneously on same field — visual noise — page.tsx:3470–3476
+[blocker] Inputs are rendered without associated <label> — WCAG 1.3.1 violation — app/forms/signup/page.tsx:124
+[major] "Progress" denominator counts optional fields; misleads users about completion — onboarding-sidebar.tsx:48
+[major] Yes/No buttons (px-6 py-3) are 44px tall next to 32px select inputs — violates consistency heuristic — question-input.tsx:67
+[minor] "Auto-filled" + "Suggested" chips render simultaneously on same field — visual noise — form-field.tsx:34
 [nit] Section 2 header uses Playfair Display at 26px; rest of form is Figtree — typographic inconsistency
 ```
 
