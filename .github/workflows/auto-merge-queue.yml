@@ -1,0 +1,55 @@
+name: Auto-queue autopilot-ready PRs
+
+# Trigger: developer (or Claude session) adds the 'autopilot-ready' label.
+# Guards: codex-review pass comment must exist on the PR.
+# Action: enables auto-merge, which routes the PR into the merge queue
+#         when merge queue is enforced in branch protection.
+#
+# This is SOFT automation — devs can still manually queue or admin-bypass.
+# Do NOT enable this workflow by merging without team review.
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  auto-queue:
+    if: github.event.label.name == 'autopilot-ready'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - name: Check for codex-review pass comment
+        id: codex-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const passComment = comments.find(c =>
+              c.body && /codex[- ](?:pr-)?pass|codex.*review.*pass/i.test(c.body)
+            );
+            if (!passComment) {
+              core.setFailed(
+                'autopilot-ready label applied but no codex-review pass comment found. ' +
+                'Remove the label or add a passing codex review before re-labeling.'
+              );
+            } else {
+              core.info(`Codex pass comment found (comment #${passComment.id}) — proceeding.`);
+            }
+
+      - name: Enable auto-merge (routes into merge queue)
+        if: steps.codex-check.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --merge \
+            --auto
