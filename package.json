@@ -94,7 +94,7 @@
     "ulid": "^3.0.2"
   },
   "optionalDependencies": {
-    "@anthropic-ai/sdk": "^0.91.1",
+    "@anthropic-ai/sdk": "^0.96.0",
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.97.0",
