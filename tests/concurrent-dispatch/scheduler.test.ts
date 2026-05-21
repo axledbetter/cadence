@@ -601,6 +601,112 @@ describe('runScheduler — deadlock detection', () => {
   });
 });
 
+describe('runScheduler — concurrency config validation (Codex pass 2 WARNING)', () => {
+  it('rejects non-finite perSubagentTimeoutMs', async () => {
+    const fx = await setupFixture();
+    try {
+      await assert.rejects(
+        runScheduler({
+          graph: oneTaskGraph(),
+          concurrency: { maxParallelSubagents: 1, perSubagentTimeoutMs: Number.NaN },
+          budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+          budget: fx.budget,
+          writer: fx.writer,
+          runId: fx.runId,
+          runWorktreesDir: fx.runWorktreesDir,
+          integrationWorktree: fx.repoDir,
+          repoLockPath: fx.repoLockPath,
+          gitQueue: fx.gitQueue,
+          subagentRunner: successfulRunner(),
+        }),
+        /perSubagentTimeoutMs/,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it('rejects zero perSubagentTimeoutMs', async () => {
+    const fx = await setupFixture();
+    try {
+      await assert.rejects(
+        runScheduler({
+          graph: oneTaskGraph(),
+          concurrency: { maxParallelSubagents: 1, perSubagentTimeoutMs: 0 },
+          budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+          budget: fx.budget,
+          writer: fx.writer,
+          runId: fx.runId,
+          runWorktreesDir: fx.runWorktreesDir,
+          integrationWorktree: fx.repoDir,
+          repoLockPath: fx.repoLockPath,
+          gitQueue: fx.gitQueue,
+          subagentRunner: successfulRunner(),
+        }),
+        /perSubagentTimeoutMs/,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+describe('runScheduler — abortReason classification (Codex pass 2 WARNING)', () => {
+  it('classifies runner-reported cancelled as error_type=other (NOT timeout)', async () => {
+    const fx = await setupFixture();
+    try {
+      const cancelledRunner: SubagentRunner = async input => {
+        // Simulate a user cancellation that the runner caught and
+        // reported as `cancelled` (not `timeout`).
+        writeCommitOptional(input.worktreePath, input.taskId);
+        return {
+          exitStatus: 'failure',
+          actualCostUsd: 0.1,
+          aborted: true,
+          abortReason: 'cancelled',
+          errorMessage: 'user pressed Ctrl-C',
+        };
+      };
+      const result = await runScheduler({
+        graph: oneTaskGraph(),
+        concurrency: { maxParallelSubagents: 1, perSubagentTimeoutMs: 10_000 },
+        budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+        budget: fx.budget,
+        writer: fx.writer,
+        runId: fx.runId,
+        runWorktreesDir: fx.runWorktreesDir,
+        integrationWorktree: fx.repoDir,
+        repoLockPath: fx.repoLockPath,
+        gitQueue: fx.gitQueue,
+        subagentRunner: cancelledRunner,
+      });
+      assert.equal(result.failed.length, 1);
+      const events = readEvents(fx.eventsPath);
+      // No task.timeout should be emitted for a cancellation.
+      assert.equal(events.filter(e => e.event === 'task.timeout').length, 0);
+      const failedEv = events.find(e => e.event === 'task.failed') as
+        | Extract<RunEvent, { event: 'task.failed' }>
+        | undefined;
+      assert.ok(failedEv, 'task.failed should be emitted');
+      assert.equal(failedEv.error_type, 'other');
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+/** Helper for the abortReason test — write a commit if possible (best-effort,
+ *  since the runner may not have written anything). */
+function writeCommitOptional(worktreePath: string, taskId: string): void {
+  try {
+    fs.writeFileSync(path.join(worktreePath, `partial-${taskId}.txt`), 'partial\n');
+    git(worktreePath, 'add', `partial-${taskId}.txt`);
+    git(worktreePath, 'commit', '-m', `partial ${taskId}`);
+  } catch {
+    /* best-effort */
+  }
+}
+
 describe('runScheduler — effective concurrency report', () => {
   it('reports effective concurrency in the diagnostics block', async () => {
     const fx = await setupFixture();

@@ -103,10 +103,14 @@ export interface SubagentRunResult {
    *  'failure'. */
   errorMessage?: string;
   /** True when the runner detected the signal had aborted and killed the
-   *  subagent. The scheduler uses this to decide between `error_type:
-   *  'timeout'` (we initiated the abort because the timer fired) and other
-   *  failure classifications. */
+   *  subagent. */
   aborted?: boolean;
+  /** Why the runner saw an abort, if any. Defaults to 'timeout' when
+   *  unspecified (back-compat with the v7.11.0-pre.4 scheduler shape).
+   *  PR 6's real runner should set this explicitly so the scheduler
+   *  doesn't misclassify user-cancellations or provider-side aborts
+   *  as timeouts (Codex pass 2 WARNING). */
+  abortReason?: 'timeout' | 'cancelled' | 'shutdown' | 'provider_abort';
 }
 
 /** SubagentRunner is the contract every concrete runner (real or mock)
@@ -292,7 +296,51 @@ export interface SchedulerResult extends DispatchResult {
  * re-invoke after it returns; use the run-state engine's resume to pick up
  * from events.ndjson.
  */
+/** Validate ConcurrencyConfig at scheduler-entry. Codex pass 2 WARNING:
+ *  silent clamping of perSubagentTimeoutMs hides deployment misconfiguration.
+ *  Reject non-finite, zero, negative, or out-of-range timeouts up front so
+ *  the operator sees a clear error instead of a surprise behaviour change.
+ *
+ *  `maxParallelSubagents` is still defensively clamped inside
+ *  `computeEffectiveConcurrency` (caller is expected to validate `1..8` at
+ *  config-load); but `perSubagentTimeoutMs` has no upstream validator yet,
+ *  so we enforce it here. */
+function validateConcurrencyConfig(cfg: ConcurrencyConfig): void {
+  if (
+    !Number.isFinite(cfg.perSubagentTimeoutMs) ||
+    cfg.perSubagentTimeoutMs <= 0 ||
+    cfg.perSubagentTimeoutMs > 2 ** 31 - 1
+  ) {
+    throw new GuardrailError(
+      `concurrency.perSubagentTimeoutMs must be a finite positive integer (got ${String(cfg.perSubagentTimeoutMs)})`,
+      {
+        code: 'invalid_config',
+        provider: 'concurrent-dispatch',
+        details: { perSubagentTimeoutMs: cfg.perSubagentTimeoutMs },
+      },
+    );
+  }
+  if (cfg.sigkillGraceMs !== undefined) {
+    if (
+      !Number.isFinite(cfg.sigkillGraceMs) ||
+      cfg.sigkillGraceMs <= 0 ||
+      cfg.sigkillGraceMs > 2 ** 31 - 1
+    ) {
+      throw new GuardrailError(
+        `concurrency.sigkillGraceMs must be a finite positive integer (got ${String(cfg.sigkillGraceMs)})`,
+        {
+          code: 'invalid_config',
+          provider: 'concurrent-dispatch',
+          details: { sigkillGraceMs: cfg.sigkillGraceMs },
+        },
+      );
+    }
+  }
+}
+
 export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerResult> {
+  validateConcurrencyConfig(opts.concurrency);
+
   // Build the lifecycle helper. Owns its own queue reference; the scheduler
   // shares the same singleton so worktree adds serialize against any future
   // cherry-picks PR 5 enqueues.
@@ -373,20 +421,47 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
       throw err;
     }
 
-    // Track whether we already released the budget. The finally block uses
-    // this to release with $0 on otherwise-unreleased paths (defensive
-    // belt-and-braces).
+    // Track whether we already released the budget. Codex pass 2 CRITICAL
+    // #2: set the flag ONLY after `release` resolves; on failure, surface
+    // a run.warning AND leave the flag false so the finally block can
+    // retry with $0. Permanently lost reservations are the worst outcome
+    // here — better to over-release in the rare retry race (idempotency in
+    // BudgetReservation.release rejects double-release with adapter_bug,
+    // which we catch + log) than to corrupt the ledger silently.
     let budgetReleased = false;
     const releaseBudget = async (actualCostUsd: number): Promise<void> => {
       if (budgetReleased) return;
-      budgetReleased = true;
-      await opts.budget
-        .release(taskId, { actualCostUsd })
-        .catch(() => undefined);
+      try {
+        await opts.budget.release(taskId, { actualCostUsd });
+        budgetReleased = true;
+      } catch (err) {
+        const msg = (err as Error).message;
+        // "already released" is benign on a retry — don't surface; just
+        // mark the flag so we don't loop.
+        if (/already released/i.test(msg)) {
+          budgetReleased = true;
+          return;
+        }
+        // Real failure — emit a warning so the operator can see the
+        // ledger drift. Do NOT set the flag; the finally block will
+        // attempt a $0 release as a last-ditch retry.
+        await opts.writer
+          .writeEvent({
+            event: 'run.warning',
+            message: `budget release failed for task ${taskId}: ${msg}`,
+            details: { task_id: taskId, actual_cost_usd: actualCostUsd },
+          })
+          .catch(() => undefined);
+      }
     };
 
-    // Track whether a terminal event has been emitted for this task. Once
-    // set, late runner results are silently swallowed.
+    // Track whether a terminal event (task.completed / task.failed /
+    // task.timeout) has been emitted. Once set, late runner results are
+    // silently swallowed (Codex pass 1 WARNING — idempotent terminal
+    // emission). NOTE: this is INDEPENDENT of the merge transition —
+    // moving from `completed` to `merged` via the mergeOrchestrator
+    // callback is a SEPARATE lifecycle stage that does not go through
+    // transitionTo (Codex pass 2 WARNING clarification).
     let terminalEmitted = false;
     const transitionTo = (state: TaskState): boolean => {
       if (terminalEmitted) return false;
@@ -425,17 +500,39 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
       }
       rec.worktree = created;
 
-      // (3) Emit task.started.
-      await opts.writer.writeEvent({
-        event: 'task.started',
-        task_id: taskId,
-        worktree_path: created.worktreePath,
-        branch: created.branch,
-        base_sha: created.baseSha,
-        subagent_id: `subagent-${opts.runId}-${taskId}`,
-        dispatched_at: new Date().toISOString(),
-        preflight_cost_estimate_usd: preFlightEstimateUsd,
-      });
+      // (3) Emit task.started. Codex pass 2 WARNING: a write failure here
+      // would leave a worktree allocated with no durable record. Treat as
+      // an explicit task startup failure: emit task.failed, release
+      // budget, halt run, and let the state-based cleanup preserve the
+      // worktree for inspection.
+      try {
+        await opts.writer.writeEvent({
+          event: 'task.started',
+          task_id: taskId,
+          worktree_path: created.worktreePath,
+          branch: created.branch,
+          base_sha: created.baseSha,
+          subagent_id: `subagent-${opts.runId}-${taskId}`,
+          dispatched_at: new Date().toISOString(),
+          preflight_cost_estimate_usd: preFlightEstimateUsd,
+        });
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (transitionTo('failed')) {
+          rec.errorMessage = `task.started write failed: ${msg}`;
+          await releaseBudget(0);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage: rec.errorMessage,
+            errorType: 'crash',
+            actualCostUsd: 0,
+          }).catch(() => undefined);
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} task.started write failed: ${msg}`,
+        });
+        return;
+      }
 
       // (4) Spawn subagent under AbortController. Hard scheduler-level
       // timeout via Promise.race — we do NOT block on the runner honouring
@@ -448,17 +545,11 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
 
       type TimeoutSentinel = { __timeout: true };
       const timeoutSentinel: TimeoutSentinel = { __timeout: true };
-      const timeoutMs = opts.concurrency.perSubagentTimeoutMs;
-      // Sanitize timeoutMs — clamp to a safe range; out-of-range values
-      // would otherwise produce a setTimeout warning + unpredictable
-      // behaviour.
-      const safeTimeoutMs = Math.max(
-        1,
-        Math.min(
-          Number.isFinite(timeoutMs) ? timeoutMs : 30 * 60_000,
-          2 ** 31 - 1, // setTimeout max
-        ),
-      );
+      // `validateConcurrencyConfig` already asserted this is a finite
+      // positive integer within setTimeout's safe range; no clamping
+      // needed (Codex pass 2 WARNING — silent clamp was the original
+      // smell).
+      const safeTimeoutMs = opts.concurrency.perSubagentTimeoutMs;
 
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       const timeoutPromise = new Promise<TimeoutSentinel>(resolve => {
@@ -500,57 +591,117 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
 
       // Detect timeout via sentinel — robust against late runner returns.
       if ((raceResult as TimeoutSentinel).__timeout === true) {
+        // Codex pass 2 CRITICAL #1: we fired AbortSignal, but the
+        // subagent may still be mutating the worktree. Wait a BOUNDED
+        // grace period (default 30s per spec; configurable via
+        // `concurrency.sigkillGraceMs` for tests) for the runner to
+        // confirm termination. If the runner settles within grace, we
+        // record any partial spend and signal SIGKILL escalation. If it
+        // exceeds grace, we proceed anyway and flag killed_signal as
+        // SIGKILL — the worktree is preserved (state-based cleanup) so
+        // any leaked writes are inspectable rather than destroyed.
+        const sigkillGraceMs = Math.max(
+          1,
+          Math.min(
+            opts.concurrency.sigkillGraceMs ?? 30_000,
+            2 ** 31 - 1,
+          ),
+        );
+        let killedSignal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM';
+        let partialActualCostUsd = 0;
+        const graceSentinel = Symbol('grace-timeout');
+        const graceResult = await Promise.race([
+          runnerPromise.then(r => r),
+          new Promise<typeof graceSentinel>(resolve =>
+            setTimeout(() => resolve(graceSentinel), sigkillGraceMs),
+          ),
+        ]);
+        if (graceResult === graceSentinel) {
+          // Subagent ignored SIGTERM. We mark SIGKILL — in PR6's real
+          // implementation, the runner will actually escalate to
+          // SIGKILL on the process group. PR4's mock runners may not,
+          // so this is best-effort accounting only.
+          killedSignal = 'SIGKILL';
+          // Detach the still-running promise. Subsequent writes are
+          // outside the scheduler's control — the worktree is
+          // preserved so a forensic inspection is possible.
+          runnerPromise.catch(() => undefined);
+        } else {
+          // Runner settled within grace — capture its reported cost
+          // for accurate budget release.
+          partialActualCostUsd = graceResult.actualCostUsd;
+        }
         if (transitionTo('timeout')) {
           await opts.writer.writeEvent({
             event: 'task.timeout',
             task_id: taskId,
             timeout_ms: safeTimeoutMs,
-            killed_signal: 'SIGTERM',
+            killed_signal: killedSignal,
           });
-          await releaseBudget(0);
+          await releaseBudget(partialActualCostUsd);
           await emitTaskFailed(opts, taskId, {
-            errorMessage: `task ${taskId} timed out after ${safeTimeoutMs}ms (scheduler hard timeout)`,
+            errorMessage: `task ${taskId} timed out after ${safeTimeoutMs}ms (scheduler hard timeout; ${killedSignal})`,
             errorType: 'timeout',
-            actualCostUsd: 0,
+            actualCostUsd: partialActualCostUsd,
           });
         }
         setHalt({
           reason: 'task_failed',
-          detail: `task ${taskId} timed out`,
+          detail: `task ${taskId} timed out (${killedSignal})`,
         });
-        // Detach the runner promise. Late settlement is ignored by the
-        // terminal-state guard above.
-        runnerPromise.catch(() => undefined);
         return;
       }
 
       const runnerResult = raceResult as SubagentRunResult;
       rec.actualCostUsd = runnerResult.actualCostUsd;
 
-      // (5) If the runner itself reported abort (timeout the runner saw
-      // first), emit the same dual-emit pair. This covers the case where
-      // the runner exits abort-aware before the scheduler's timer fired.
+      // (5) Runner reported abort — translate to the right terminal
+      // event based on abortReason (Codex pass 2 WARNING). Only an
+      // explicit `timeout` abort emits the task.timeout + task.failed
+      // dual-pair; other reasons (cancelled, shutdown, provider_abort)
+      // emit task.failed with error_type: 'crash' or 'other'.
       if (runnerResult.aborted === true) {
-        if (transitionTo('timeout')) {
-          await opts.writer.writeEvent({
-            event: 'task.timeout',
-            task_id: taskId,
-            timeout_ms: safeTimeoutMs,
-            killed_signal: 'SIGTERM',
+        const reason = runnerResult.abortReason ?? 'timeout';
+        if (reason === 'timeout') {
+          if (transitionTo('timeout')) {
+            await opts.writer.writeEvent({
+              event: 'task.timeout',
+              task_id: taskId,
+              timeout_ms: safeTimeoutMs,
+              killed_signal: 'SIGTERM',
+            });
+            await releaseBudget(runnerResult.actualCostUsd);
+            await emitTaskFailed(opts, taskId, {
+              errorMessage:
+                runnerResult.errorMessage ??
+                `task ${taskId} aborted (runner-reported timeout)`,
+              errorType: 'timeout',
+              actualCostUsd: runnerResult.actualCostUsd,
+            });
+          }
+          setHalt({
+            reason: 'task_failed',
+            detail: `task ${taskId} aborted (runner-reported timeout)`,
           });
-          await releaseBudget(runnerResult.actualCostUsd);
-          await emitTaskFailed(opts, taskId, {
-            errorMessage:
-              runnerResult.errorMessage ??
-              `task ${taskId} aborted (runner reported abort)`,
-            errorType: 'timeout',
-            actualCostUsd: runnerResult.actualCostUsd,
+        } else {
+          // cancelled / shutdown / provider_abort — terminal failure
+          // but NOT a timeout. error_type is 'other' so resume
+          // classification doesn't conflate them.
+          if (transitionTo('failed')) {
+            await releaseBudget(runnerResult.actualCostUsd);
+            await emitTaskFailed(opts, taskId, {
+              errorMessage:
+                runnerResult.errorMessage ??
+                `task ${taskId} aborted (reason=${reason})`,
+              errorType: 'other',
+              actualCostUsd: runnerResult.actualCostUsd,
+            });
+          }
+          setHalt({
+            reason: 'task_failed',
+            detail: `task ${taskId} aborted (reason=${reason})`,
           });
         }
-        setHalt({
-          reason: 'task_failed',
-          detail: `task ${taskId} aborted (runner-reported)`,
-        });
         return;
       }
 
