@@ -1014,6 +1014,80 @@ describe('runRunsCleanup --force-unlock', () => {
     cleanup(cwd);
   });
 
+  it('rejects lockPath override outside the conventional location or tmpdir', async () => {
+    // Codex pass 2 WARNING: the `lockPath` option remained on the
+    // exported API. The handler now validates it points to either the
+    // conventional `<cwd>/.claude/run-state/repo.lock` path or
+    // somewhere under the OS tmpdir.
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      allowActive: true,
+      lockPath: '/etc/passwd', // not under cwd or tmpdir
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /outside the expected location/);
+    cleanup(cwd);
+  });
+
+  it('TOCTOU: refuses unlock when holder identity changed during prompt', async () => {
+    // Codex pass 2 WARNING: between the safety gate and the unlock, a
+    // sibling process could release-then-reacquire. The handler now
+    // re-reads metadata immediately before unlock and refuses if the
+    // holder fingerprint changed.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'original',
+      run_id: 'r1',
+    });
+    // Forge stale metadata so the gate would otherwise allow.
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'original',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    // The promptFn runs AFTER the safety gate. Mutate the metadata to
+    // simulate a new holder arriving in the prompt window.
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => {
+        // Swap in a different holder identity.
+        fs.writeFileSync(
+          lockPath + '.meta.json',
+          JSON.stringify({
+            pid: process.pid,
+            hostname: os.hostname(),
+            command: 'newcomer',
+            run_id: 'r2',
+            acquired_at_iso: new Date().toISOString(),
+          }),
+        );
+        return 'yes';
+      },
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /changed hands/);
+    // Lock not removed.
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    forceUnlockRepoLock(lockPath);
+    cleanup(cwd);
+  });
+
   it('--json envelope reports cleared=true with previous holder metadata', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);

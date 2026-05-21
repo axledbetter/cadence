@@ -19,6 +19,7 @@
 // surface; strict stdout/stderr channel discipline lands in Phase 5.
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { GuardrailError } from '../core/errors.ts';
@@ -1215,6 +1216,51 @@ function defaultRepoLockPath(cwd: string): string {
 }
 
 /**
+ * Validate that a caller-supplied `lockPath` is safe to use. We accept:
+ *   - the conventional default `<cwd>/.claude/run-state/repo.lock`
+ *   - paths under the OS temp dir (for tests using `mkdtemp` scratch dirs)
+ *
+ * Anything else throws. This protects against an internal caller routing
+ * user-controlled input into `forceUnlockRepoLock`, which would otherwise
+ * remove arbitrary `<path>` + `<path>.lock` pairs on disk.
+ *
+ * Codex pass 2 WARNING — the `lockPath` option remained on the exported
+ * API surface even after the CLI flag was removed.
+ */
+function assertSafeLockPath(lockPath: string, cwd: string): void {
+  const conventional = defaultRepoLockPath(cwd);
+  const tmpRoot = os.tmpdir();
+  const resolved = path.resolve(lockPath);
+
+  if (resolved === path.resolve(conventional)) return;
+  // Allow temp-dir paths for tests. Use realpath-resolved tmpdir to handle
+  // /var → /private/var on macOS.
+  let tmpResolved: string;
+  try {
+    tmpResolved = fs.realpathSync(tmpRoot);
+  } catch {
+    tmpResolved = path.resolve(tmpRoot);
+  }
+  const resolvedReal = (() => {
+    try {
+      return fs.realpathSync(path.dirname(resolved)) + path.sep + path.basename(resolved);
+    } catch {
+      return resolved;
+    }
+  })();
+  if (resolvedReal.startsWith(tmpResolved + path.sep)) return;
+
+  throw new GuardrailError(
+    `runs cleanup: lockPath override outside the expected location is refused (got "${lockPath}", expected "${conventional}" or a temp-dir path)`,
+    {
+      code: 'invalid_config',
+      provider: 'runs-cli',
+      details: { lockPath, conventional },
+    },
+  );
+}
+
+/**
  * `runs cleanup --force-unlock` — surface the holder, require explicit
  * `yes` confirmation, then unlink the lock metadata + the proper-lockfile
  * `.lock` directory. Idempotent: if nothing is held, returns success with
@@ -1226,6 +1272,24 @@ export async function runRunsCleanup(
   const cwd = opts.cwd ?? process.cwd();
   const json = !!opts.json;
   const lockPath = opts.lockPath ?? defaultRepoLockPath(cwd);
+
+  // Validate lockPath if it was supplied (Codex pass 2 WARNING).
+  if (opts.lockPath) {
+    try {
+      assertSafeLockPath(opts.lockPath, cwd);
+    } catch (err) {
+      return maybeEnvelope(
+        'runs cleanup',
+        json,
+        {
+          exit: 1,
+          stdout: [],
+          stderr: [`[claude-autopilot] runs cleanup: ${formatErr(err)}`],
+        },
+        { error: formatErr(err) },
+      );
+    }
+  }
 
   if (!opts.forceUnlock) {
     const err = new GuardrailError(
@@ -1282,9 +1346,13 @@ export async function runRunsCleanup(
   // — live holder, unknown holder (no metadata), or cross-host — is
   // suspicious. Codex pass 1 WARNING flagged that scripted `--yes` could
   // silently steal an active lock. (#189 PR review)
-  const stalePreCheck = meta ? isLockStale(meta) : null;
-  const isUnknownOrLive = !meta || stalePreCheck === false;
-  if (isUnknownOrLive && !opts.allowActive) {
+  //
+  // Fail-closed semantics (Codex pass 2 WARNING): only proceed when
+  // `isLockStale(meta) === true`. Any other value (false, or — if the
+  // signature evolves — null/undefined for "cannot determine") falls
+  // back to refusing without --allow-active.
+  const isConfirmedStale = meta ? isLockStale(meta) === true : false;
+  if (!isConfirmedStale && !opts.allowActive) {
     const err = new GuardrailError(
       meta
         ? `repo lock at ${lockPath} is not stale (holder appears active) — re-run with --allow-active to override`
@@ -1350,6 +1418,49 @@ export async function runRunsCleanup(
         stdout: [],
         stderr: [`runs cleanup: aborted (confirmation not "yes")`],
       };
+    }
+  }
+
+  // TOCTOU re-check (Codex pass 2 WARNING): between the safety gate above
+  // and the actual unlock, the holder could have released and a new
+  // process could have acquired the lock. Re-read the metadata and refuse
+  // the unlock if the holder identity changed since the diagnostic was
+  // printed. Skipped when --allow-active was explicitly requested (the
+  // user has accepted the risk; this branch is reserved for force-clear
+  // operations that should not be blocked by a fast-acquiring sibling).
+  if (!opts.allowActive) {
+    const refreshed = peekRepoLock(lockPath);
+    const sameHolder =
+      (refreshed === null && meta === null) ||
+      (refreshed !== null &&
+        meta !== null &&
+        refreshed.pid === meta.pid &&
+        refreshed.hostname === meta.hostname &&
+        refreshed.run_id === meta.run_id &&
+        refreshed.acquired_at_iso === meta.acquired_at_iso);
+    if (!sameHolder) {
+      const err = new GuardrailError(
+        'repo lock changed hands during cleanup — refusing to clear the new holder',
+        {
+          code: 'invalid_config',
+          provider: 'runs-cli',
+          details: {
+            lockPath,
+            ...(meta ? { observedHolder: meta } : {}),
+            ...(refreshed ? { currentHolder: refreshed } : {}),
+          },
+        },
+      );
+      return maybeEnvelope(
+        'runs cleanup',
+        json,
+        {
+          exit: 1,
+          stdout: [],
+          stderr: [`[claude-autopilot] runs cleanup: ${formatErr(err)}`],
+        },
+        { error: formatErr(err), lockPath },
+      );
     }
   }
 
