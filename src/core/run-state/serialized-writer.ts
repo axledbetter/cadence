@@ -37,8 +37,9 @@
 //   (1) any reader (`runs show`, `runs replay`) would not block, BUT
 //       proper-lockfile inspects the target's mtime to detect staleness.
 //       Concurrent appenders flipping mtime would confuse the staleness
-//       heuristic. We disable it (`stale: 0`) but the safer separation is
-//       lock target ≠ data file.
+//       heuristic. We disable it (`stale: Infinity`) and clean stale
+//       lock dirs from prior crashes at `init()`, but the safer
+//       separation is lock target ≠ data file.
 //   (2) the lockfile directory `<events.ndjson>.lock` would sit next to
 //       the data file, which is what the file watchers in `runs tail`
 //       (PR 6) expect to be a clean ndjson stream.
@@ -170,6 +171,25 @@ export class SerializedWriter {
       fs.writeFileSync(this.opts.lockPath, '');
     }
 
+    // Sweep stale lock dirs from prior crashed processes. proper-lockfile
+    // creates `<lockPath>.lock` as a directory and unlinks it on release.
+    // If the prior owner crashed, the dir lingers forever (we use
+    // `stale: Infinity` to disable mtime-based staleness — the writer is
+    // single-instance per scheduler process, and the prior-run cleanup
+    // happens HERE at the next init, not via heuristics). Bugbot pass 3
+    // flagged the previous `stale: 0` behavior which falsely claimed
+    // staleness was disabled but actually treated every lock as stale.
+    const staleLockDir = `${this.opts.lockPath}.lock`;
+    if (fs.existsSync(staleLockDir)) {
+      try {
+        fs.rmSync(staleLockDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort — if another process is mid-acquire (unlikely
+        // given single-scheduler-per-run), we'll hit ELOCKED in
+        // withLock and surface a clean error there.
+      }
+    }
+
     // Open the events file in O_APPEND mode. POSIX guarantees each write()
     // is atomic at the kernel boundary regardless of competing writers.
     this.fd = fs.openSync(this.opts.eventsNdjsonPath, 'a');
@@ -295,10 +315,14 @@ export class SerializedWriter {
       try {
         release = await lockfile.lock(this.opts.lockPath, {
           retries: 0,
-          // Disable proper-lockfile's mtime-based staleness — the writer is
-          // single-instance per scheduler process; if it crashes, the lock
-          // dir is cleaned by next-process startup, NOT by mtime heuristic.
-          stale: 0,
+          // Disable proper-lockfile's mtime-based staleness — the writer
+          // is single-instance per scheduler process; if it crashes, the
+          // lock dir is cleaned by next-process startup in `init()`, NOT
+          // by mtime heuristic. `Infinity` is the documented way to
+          // disable staleness in proper-lockfile (`stale: 0` was a bug
+          // — bugbot pass 3 flag — because `!0` is truthy and the
+          // library treated every lock as stale).
+          stale: Number.POSITIVE_INFINITY,
           realpath: false,
         });
         break;

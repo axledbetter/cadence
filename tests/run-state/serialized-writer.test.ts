@@ -256,4 +256,38 @@ describe('SerializedWriter', () => {
     assert.ok(p.startsWith('/tmp/run-x/events.ndjson'));
     assert.ok(p.endsWith('.writer.lock'));
   });
+
+  it('sweeps stale lock dirs left by crashed prior process (bugbot pass 3)', async () => {
+    // Simulate a crashed process: the lock dir `<lockPath>.lock` exists
+    // but no live owner. init() must clean it so the next acquire
+    // doesn't spin to timeout. (Pre-fix, `stale: 0` was misread by
+    // proper-lockfile as `!0 → truthy` and treated every lock as stale,
+    // OR — depending on version — never timed out and blocked all
+    // future writes for 20 minutes.)
+    const { eventsPath } = tmpRun();
+    const lockPath = `${eventsPath}.writer.lock`;
+    const staleLockDir = `${lockPath}.lock`;
+    fs.mkdirSync(staleLockDir, { recursive: true });
+    fs.writeFileSync(path.join(staleLockDir, 'pid'), '999999');
+
+    // init() must sweep the stale dir; lock acquire should succeed
+    // immediately rather than spinning to timeout.
+    const w = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: testWriterId,
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 10,
+    });
+    try {
+      await w.writeEvent({
+        event: 'task.budget_halt',
+        task_id: 't1',
+        budget_remaining_usd: 0,
+        preflight_estimate_usd: 1,
+      });
+      assert.ok(true, 'writeEvent succeeded — stale lock was swept');
+    } finally {
+      await w.close();
+    }
+  });
 });
