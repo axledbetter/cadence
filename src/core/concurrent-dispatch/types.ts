@@ -134,6 +134,7 @@ export interface DepGraphWarning {
     | 'file-overlap-no-explicit-dep'
     | 'fuzzy-name-resolved'
     | 'implicit-create-modify-dep'
+    | 'implicit-create-test-dep'
     | 'unannotated-fallback-sequential';
   /** Human-readable message for the run report. */
   message: string;

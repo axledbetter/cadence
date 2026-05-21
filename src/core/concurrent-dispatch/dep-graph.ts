@@ -146,13 +146,14 @@ export function buildDepGraph(
   }
 
   // Trivial empty / single-task graphs short-circuit (no edges possible).
-  // Freeze the outer container on these paths too for consistency with the
-  // full-build path below.
+  // Freeze the outer container AND the arrays on these paths too for
+  // consistency with the full-build path below. (See the closing return
+  // for the rationale on which fields get frozen and which don't.)
   if (tasks.length === 0) {
-    return Object.freeze({ tasks, dependencies, dependents, warnings });
+    return freezeGraph(tasks, dependencies, dependents, warnings);
   }
   if (tasks.length === 1) {
-    return Object.freeze({ tasks, dependencies, dependents, warnings });
+    return freezeGraph(tasks, dependencies, dependents, warnings);
   }
 
   // ---- Layer 1: explicit `depends_on:` annotations ----
@@ -226,10 +227,12 @@ export function buildDepGraph(
   // Create -> Test edges (read-after-write hazard, Codex pass 2 finding):
   // if Task A creates `tests/foo.test.ts` and Task B lists the same path
   // under `Test:`, Task B must wait for Task A so the test file exists
-  // before B references it. We deliberately do NOT do the same for
-  // Modify -> Test (modifying an existing test file doesn't change
-  // existence semantics) and NOT for Test/Test pairs (same-target sharing
-  // is not a write hazard).
+  // before B references it. Use a distinct warning code so downstream
+  // consumers (UI, metrics, suppression rules) can differentiate this
+  // semantics from Create -> Modify write conflicts. We deliberately do
+  // NOT do the same for Modify -> Test (modifying an existing test file
+  // doesn't change existence semantics) and NOT for Test/Test pairs
+  // (same-target sharing is not a write hazard).
   for (const t of tasks) {
     for (const p of t.tests) {
       const cs = creators.get(p);
@@ -238,7 +241,7 @@ export function buildDepGraph(
         if (creatorId === t.id) continue;
         if (addEdge(dependencies, dependents, creatorId, t.id)) {
           warnings.push({
-            code: 'implicit-create-modify-dep',
+            code: 'implicit-create-test-dep',
             message: `Task ${t.id} references test "${p}" which Task ${creatorId} creates; implicit dependency injected`,
             taskIds: [creatorId, t.id],
           });
@@ -304,11 +307,31 @@ export function buildDepGraph(
     throw new DepGraphCycleError(cycle);
   }
 
-  // Lightweight runtime immutability for the outer graph container. The
-  // inner `Map`/`Set` instances remain mutable at runtime (deep-freezing
-  // every set/map would be hot-path overhead the scheduler doesn't need),
-  // but the type-level `ReadonlyMap`/`ReadonlySet` contract on `DepGraph`
-  // prevents accidental mutation in type-checked downstream code.
+  // Lightweight runtime immutability for the outer graph container plus
+  // the `tasks` and `warnings` arrays (cheap to freeze; consumers might
+  // reasonably try `g.warnings.push(...)` or `g.tasks.sort()` at the
+  // boundary). The inner `Map`/`Set` instances remain mutable at runtime
+  // (deep-freezing every set/map would be hot-path overhead the scheduler
+  // doesn't need); the type-level `ReadonlyMap`/`ReadonlySet` contract on
+  // `DepGraph` is the primary guardrail for those.
+  return freezeGraph(tasks, dependencies, dependents, warnings);
+}
+
+/**
+ * Freeze the outer `DepGraph` container plus the `tasks` and `warnings`
+ * arrays. `dependencies` and `dependents` maps are intentionally NOT
+ * deep-frozen: type-level `ReadonlyMap`/`ReadonlySet` is the contract for
+ * the inner collections, and runtime freezing them would add cost without
+ * eliminating the legitimate need to query them via `get`/`has`/etc.
+ */
+function freezeGraph(
+  tasks: TaskNode[],
+  dependencies: Map<string, Set<string>>,
+  dependents: Map<string, Set<string>>,
+  warnings: DepGraphWarning[],
+): DepGraph {
+  Object.freeze(tasks);
+  Object.freeze(warnings);
   return Object.freeze({ tasks, dependencies, dependents, warnings });
 }
 

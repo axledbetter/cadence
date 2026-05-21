@@ -425,7 +425,8 @@ describe('buildDepGraph — implicit dep injection', () => {
   it('create -> test edge: Task A creates a test file Task B lists under Test', () => {
     // Codex pass 2 finding: read-after-write hazard. If Task A creates a
     // test file that Task B references, B must wait for A so the file
-    // exists when B runs.
+    // exists when B runs. Pass 3 added a distinct warning code so
+    // downstream consumers can differentiate from Create -> Modify.
     const plan = makePlan(
       '### Task 1: Creates test fixture',
       '',
@@ -440,6 +441,15 @@ describe('buildDepGraph — implicit dep injection', () => {
     );
     const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.ok(hasEdge(g, '1', '2'), 'expected create -> test edge 1 -> 2');
+    const codes = g.warnings.map((w) => w.code);
+    assert.ok(
+      codes.includes('implicit-create-test-dep'),
+      `expected implicit-create-test-dep warning, got: ${codes.join(', ')}`,
+    );
+    assert.ok(
+      !codes.includes('implicit-create-modify-dep'),
+      'create->test edge must NOT be tagged as implicit-create-modify-dep',
+    );
   });
 });
 
@@ -606,6 +616,20 @@ describe('Edge cases', () => {
     // is the primary guardrail there.)
     const g = parseAndBuildDepGraph('### Task 1: A\n');
     assert.equal(Object.isFrozen(g), true);
+  });
+
+  it('returned DepGraph tasks and warnings arrays are frozen', () => {
+    // Codex pass 3 finding: extend runtime freeze to the arrays so
+    // `g.warnings.push(...)` / `g.tasks.sort()` cannot corrupt the graph.
+    const g = parseAndBuildDepGraph(
+      makePlan(
+        '### Task 1: A',
+        '',
+        '### Task 2: B',
+      ),
+    );
+    assert.equal(Object.isFrozen(g.tasks), true);
+    assert.equal(Object.isFrozen(g.warnings), true);
   });
 
   it('depends_on referencing a nonexistent task throws DepGraphResolutionError', () => {
