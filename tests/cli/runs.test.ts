@@ -19,12 +19,17 @@ import { ulid } from '../../src/core/run-state/ulid.ts';
 import {
   computeResumeLookup,
   runRunResume,
+  runRunsCleanup,
   runRunsDelete,
   runRunsDoctor,
   runRunsGc,
   runRunsList,
   runRunsShow,
 } from '../../src/cli/runs.ts';
+import {
+  acquireRepoLock,
+  forceUnlockRepoLock,
+} from '../../src/core/run-state/repo-lock.ts';
 import { RUN_STATE_SCHEMA_VERSION, type RunState } from '../../src/core/run-state/types.ts';
 
 function tmpCwd(): string {
@@ -788,6 +793,336 @@ describe('runs CLI sanity', () => {
     assert.ok(fs.existsSync(eventsPath(a.runDir)));
     const r = await runRunsShow({ runId: a.runId, cwd });
     assert.equal(r.exit, 0);
+    cleanup(cwd);
+  });
+});
+
+// ============================================================================
+// runs cleanup --force-unlock — v7.11.0 PR 2/6
+// ============================================================================
+
+describe('runRunsCleanup --force-unlock', () => {
+  /** Default lock path for a given cwd, matching the CLI's resolver. */
+  function lockPathFor(cwd: string): string {
+    return path.join(cwd, '.claude', 'run-state', 'repo.lock');
+  }
+
+  it('rejects without --force-unlock (no other operation defined yet)', async () => {
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({ cwd, forceUnlock: false });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /requires an operation flag/);
+    cleanup(cwd);
+  });
+
+  it('returns "nothing to do" when no lock is present', async () => {
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath: lockPathFor(cwd),
+    });
+    assert.equal(r.exit, 0);
+    assert.match(r.stdout.join('\n'), /nothing to do/);
+    cleanup(cwd);
+  });
+
+  it('refuses to clear a live (non-stale) lock without --allow-active', async () => {
+    // Codex pass 1 WARNING: scripted `--yes` could silently steal an
+    // active lock. Default behaviour is now to refuse non-stale locks.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'live-test',
+      run_id: 'r1',
+    });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /not stale|--allow-active/);
+    // Lock untouched.
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('removes a live lock when --allow-active --yes is set', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+    // Intentionally do NOT release — simulate a crashed process the user
+    // is sure is dead.
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      allowActive: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 0, r.stderr.join('\n'));
+    assert.match(r.stdout.join('\n'), /removed repo lock/);
+    assert.equal(fs.existsSync(lockPath + '.lock'), false);
+    assert.equal(fs.existsSync(lockPath + '.meta.json'), false);
+
+    // After cleanup, release on the original handle should be no-op safe.
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('refuses to clear a no-metadata lock without --allow-active', async () => {
+    // Codex pass 1 WARNING: missing metadata could be the narrow window
+    // between proper-lockfile acquisition and metadata sidecar write —
+    // i.e. a LIVE acquirer. Refuse by default.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    // Create the .lock dir without metadata.
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, '');
+    fs.mkdirSync(lockPath + '.lock', { recursive: true });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /no metadata|--allow-active/);
+    cleanup(cwd);
+  });
+
+  it('aborts when promptFn returns anything other than "yes" (stale lock)', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+    // Forge stale metadata so the safety gate doesn't refuse first.
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    let prompted = false;
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => {
+        prompted = true;
+        return 'no';
+      },
+    });
+    assert.equal(prompted, true, 'prompt should have been invoked');
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /aborted/);
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    forceUnlockRepoLock(lockPath);
+    cleanup(cwd);
+  });
+
+  it('proceeds when promptFn returns "yes" (with whitespace) on stale lock', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => '  yes  \n',
+    });
+    assert.equal(r.exit, 0, r.stderr.join('\n'));
+    assert.equal(fs.existsSync(lockPath + '.lock'), false);
+
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('requires --yes in --json mode for stale lock (no interactive prompt under JSON)', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      json: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    const parsed = JSON.parse(r.stdout[0]!);
+    assert.equal(parsed.status, 'fail');
+    assert.match(String(parsed.error), /requires --yes/);
+
+    await handle.release();
+    forceUnlockRepoLock(lockPath);
+    cleanup(cwd);
+  });
+
+  it('rejects lockPath override outside the conventional location or tmpdir', async () => {
+    // Codex pass 2 WARNING: the `lockPath` option remained on the
+    // exported API. The handler now validates it points to either the
+    // conventional `<cwd>/.claude/run-state/repo.lock` path or
+    // somewhere under the OS tmpdir.
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      allowActive: true,
+      lockPath: '/etc/passwd', // not under cwd or tmpdir
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /outside the expected location/);
+    cleanup(cwd);
+  });
+
+  it('TOCTOU: refuses unlock when holder identity changed during prompt', async () => {
+    // Codex pass 2 WARNING: between the safety gate and the unlock, a
+    // sibling process could release-then-reacquire. The handler now
+    // re-reads metadata immediately before unlock and refuses if the
+    // holder fingerprint changed.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'original',
+      run_id: 'r1',
+    });
+    // Forge stale metadata so the gate would otherwise allow.
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'original',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    // The promptFn runs AFTER the safety gate. Mutate the metadata to
+    // simulate a new holder arriving in the prompt window.
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => {
+        // Swap in a different holder identity.
+        fs.writeFileSync(
+          lockPath + '.meta.json',
+          JSON.stringify({
+            pid: process.pid,
+            hostname: os.hostname(),
+            command: 'newcomer',
+            run_id: 'r2',
+            acquired_at_iso: new Date().toISOString(),
+          }),
+        );
+        return 'yes';
+      },
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /changed hands/);
+    // Lock not removed.
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    forceUnlockRepoLock(lockPath);
+    cleanup(cwd);
+  });
+
+  it('--json envelope reports cleared=true with previous holder metadata', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'rrr',
+    });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'rrr',
+        acquired_at_iso: ancient,
+      }),
+    );
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      json: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 0);
+    const parsed = JSON.parse(r.stdout[0]!);
+    assert.equal(parsed.status, 'pass');
+    assert.equal(parsed.cleared, true);
+    assert.equal(parsed.previousHolder.command, 'orphan-test');
+    assert.equal(parsed.previousHolder.run_id, 'rrr');
+
+    await handle.release();
     cleanup(cwd);
   });
 });
