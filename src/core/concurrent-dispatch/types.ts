@@ -113,14 +113,14 @@ export interface FallbackPolicy {
  * explicit `depends_on:` annotation) for the run report.
  */
 export interface DepGraph {
-  /** Parsed tasks in plan-declaration order. */
-  tasks: TaskNode[];
+  /** Parsed tasks in plan-declaration order. Treat as read-only. */
+  readonly tasks: readonly TaskNode[];
   /** `dependencies.get(id)` = task ids that `id` depends on. */
-  dependencies: Map<string, Set<string>>;
+  readonly dependencies: ReadonlyMap<string, ReadonlySet<string>>;
   /** `dependents.get(id)` = task ids that depend on `id` (inverse). */
-  dependents: Map<string, Set<string>>;
+  readonly dependents: ReadonlyMap<string, ReadonlySet<string>>;
   /** Non-fatal observations surfaced in the run report. */
-  warnings: DepGraphWarning[];
+  readonly warnings: readonly DepGraphWarning[];
 }
 
 /**

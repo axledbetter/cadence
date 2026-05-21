@@ -28,11 +28,12 @@ import {
 /**
  * Default fallback policy: when ZERO tasks have `depends_on:`, fall back to
  * strict sequential execution. This is the conservative, backwards-compatible
- * choice (v7.10.0 behavior).
+ * choice (v7.10.0 behavior). Frozen to prevent process-wide drift from
+ * accidental consumer mutation.
  */
-export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = {
+export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = Object.freeze({
   assumeIndependentWithoutDependsOn: false,
-};
+}) satisfies FallbackPolicy;
 
 /**
  * Parse a plan markdown string into a list of `TaskNode`s in
@@ -119,6 +120,22 @@ export function buildDepGraph(
   tasks: TaskNode[],
   policy: FallbackPolicy = DEFAULT_FALLBACK_POLICY,
 ): DepGraph {
+  // Validate uniqueness up-front: this function is exported and reachable
+  // by callers that construct `TaskNode[]` directly (not via parsePlan). A
+  // duplicate id would silently overwrite earlier map entries and corrupt
+  // the graph for the scheduler downstream.
+  const seenIds = new Set<string>();
+  for (const t of tasks) {
+    if (seenIds.has(t.id)) {
+      throw new DepGraphResolutionError(
+        `Task ${t.id}`,
+        t.id,
+        `duplicate task id; each TaskNode passed to buildDepGraph must have a unique id`,
+      );
+    }
+    seenIds.add(t.id);
+  }
+
   const dependencies = new Map<string, Set<string>>();
   const dependents = new Map<string, Set<string>>();
   const warnings: DepGraphWarning[] = [];
@@ -140,10 +157,16 @@ export function buildDepGraph(
   const byId = new Map<string, TaskNode>();
   for (const t of tasks) byId.set(t.id, t);
 
+  // Count only tasks whose annotation contains at least one non-empty
+  // reference. An empty `**depends_on:**` line is treated as "no real
+  // declaration" so it doesn't flip off the strict-sequential fallback.
+  // (Without this, a single empty annotation would silently enable
+  // file-overlap inference for an otherwise unannotated plan.)
   let annotatedCount = 0;
   for (const t of tasks) {
     if (t.declaredDependsOn === undefined) continue;
-    annotatedCount += 1;
+    const hasNonEmptyRef = t.declaredDependsOn.some((r) => r.trim() !== '');
+    if (hasNonEmptyRef) annotatedCount += 1;
     for (const rawRef of t.declaredDependsOn) {
       const ref = rawRef.trim();
       if (ref === '') continue;
@@ -162,17 +185,19 @@ export function buildDepGraph(
   // ---- Layer 2: implicit edges from file overlap ----
   // Build path -> creators / touchers index. Paths are already normalized
   // by `parseFilesBlock`.
+  //
+  // Only `creates` and `modifies` count as write-like touches for the
+  // overlap heuristic. `tests` is intentionally excluded: a Test bullet
+  // names a validation target, not a write contention, and including it
+  // would over-serialize tasks that merely share a test target.
   const creators = new Map<string, string[]>(); // path -> [taskId...]
-  const touchers = new Map<string, string[]>(); // path -> [taskId...] (creates+modifies+tests)
+  const touchers = new Map<string, string[]>(); // path -> [taskId...] (creates+modifies only)
   for (const t of tasks) {
     for (const p of t.creates) {
       pushUnique(creators, p, t.id);
       pushUnique(touchers, p, t.id);
     }
     for (const p of t.modifies) {
-      pushUnique(touchers, p, t.id);
-    }
-    for (const p of t.tests) {
       pushUnique(touchers, p, t.id);
     }
   }

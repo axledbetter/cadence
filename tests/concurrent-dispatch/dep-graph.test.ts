@@ -310,6 +310,13 @@ describe('resolveTaskReference — fuzzy name resolution', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildDepGraph — implicit dep injection', () => {
+  // These tests exercise the file-overlap heuristic in isolation. To remove
+  // the strict-sequential fallback (which would mask the heuristic), we pass
+  // `assumeIndependentWithoutDependsOn: true`. Empty `**depends_on:**`
+  // markers do NOT count as annotations under the corrected semantics
+  // (Codex pass 1 fix) — only non-empty references flip off the fallback.
+  const PARALLEL_POLICY = { assumeIndependentWithoutDependsOn: true };
+
   it('Task B modifies a file Task A creates -> A blocks B', () => {
     const plan = makePlan(
       '### Task 1: Creator',
@@ -317,39 +324,31 @@ describe('buildDepGraph — implicit dep injection', () => {
       '**Files:**',
       '- Create: `src/x.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Modifier',
       '',
       '**Files:**',
       '- Modify: `src/x.ts`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.ok(hasEdge(g, '1', '2'), 'expected implicit edge 1 -> 2');
   });
 
   it('multi-direction: Task A creates X, Task B modifies X => A blocks B regardless of plan order', () => {
-    // The same plan with Task B declared FIRST in the markdown but creating
-    // happens in Task A: the create-modify edge should still point A -> B.
+    // The same plan with the modifier declared FIRST in the markdown but
+    // creating happens in Task 2: the create-modify edge should still
+    // point Creator (Task 2) -> Modifier (Task 1).
     const plan = makePlan(
       '### Task 1: Modifies x',
       '',
       '**Files:**',
       '- Modify: `src/x.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Creates x',
       '',
       '**Files:**',
       '- Create: `src/x.ts`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
-    // Creator (Task 2) -> Modifier (Task 1)
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.ok(hasEdge(g, '2', '1'), 'expected implicit edge 2 -> 1');
   });
 
@@ -360,16 +359,12 @@ describe('buildDepGraph — implicit dep injection', () => {
       '**Files:**',
       '- Create: `./src/x.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Modifier',
       '',
       '**Files:**',
       '- Modify: `src/x.ts`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.ok(hasEdge(g, '1', '2'));
   });
 
@@ -380,16 +375,12 @@ describe('buildDepGraph — implicit dep injection', () => {
       '**Files:**',
       '- Create: `src/x.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Different file',
       '',
       '**Files:**',
       '- Create: `src/y.ts`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.deepEqual(depsOf(g, '1'), []);
     assert.deepEqual(depsOf(g, '2'), []);
   });
@@ -401,17 +392,34 @@ describe('buildDepGraph — implicit dep injection', () => {
       '**Files:**',
       '- Create: `src/x.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Modifier with range',
       '',
       '**Files:**',
       '- Modify: `src/x.ts:42-60`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
     assert.ok(hasEdge(g, '1', '2'));
+  });
+
+  it('test-file overlap does NOT create an implicit edge (write semantics only)', () => {
+    // Codex pass 1 finding: Tests should not be treated as write-like
+    // touches. Two tasks that name the same Test path stay independent.
+    const plan = makePlan(
+      '### Task 1: A',
+      '',
+      '**Files:**',
+      '- Create: `src/a.ts`',
+      '- Test: `tests/shared.test.ts`',
+      '',
+      '### Task 2: B',
+      '',
+      '**Files:**',
+      '- Create: `src/b.ts`',
+      '- Test: `tests/shared.test.ts`',
+    );
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
+    assert.deepEqual(depsOf(g, '1'), []);
+    assert.deepEqual(depsOf(g, '2'), []);
   });
 });
 
@@ -461,9 +469,31 @@ describe('Fallback policy — decision tree', () => {
     assert.deepEqual(depsOf(g, '1'), []);
   });
 
-  it('at-least-one annotation flips off the sequential fallback', () => {
+  it('at-least-one real annotation flips off the sequential fallback', () => {
     const plan = makePlan(
       '### Task 1: A',
+      '',
+      '### Task 2: B',
+      '',
+      '**depends_on:** Task 1',
+      '',
+      '### Task 3: C',
+    );
+    // Task 2 has a real annotation; Task 3 does not. Fallback policy should
+    // NOT trigger because annotatedCount >= 1, so Task 3 stays free instead
+    // of inheriting a strict-sequential edge from Task 2.
+    const g = parseAndBuildDepGraph(plan);
+    assert.deepEqual(depsOf(g, '2'), ['1']);
+    assert.deepEqual(depsOf(g, '3'), []);
+  });
+
+  it('empty **depends_on:** annotations do NOT count as real annotations', () => {
+    // Codex pass 1 finding: an empty annotation must not silently switch
+    // the plan from strict-sequential to file-overlap-only inference.
+    const plan = makePlan(
+      '### Task 1: A',
+      '',
+      '**depends_on:**',
       '',
       '### Task 2: B',
       '',
@@ -471,11 +501,14 @@ describe('Fallback policy — decision tree', () => {
       '',
       '### Task 3: C',
     );
-    // Task 2 has an annotation (empty); Task 3 does not. Fallback policy
-    // should NOT trigger because annotatedCount >= 1.
     const g = parseAndBuildDepGraph(plan);
-    assert.deepEqual(depsOf(g, '2'), []);
-    assert.deepEqual(depsOf(g, '3'), []);
+    // Strict-sequential fallback should fire (all annotations are empty).
+    assert.deepEqual(depsOf(g, '2'), ['1']);
+    assert.deepEqual(depsOf(g, '3'), ['2']);
+    assert.ok(
+      g.warnings.some((w) => w.code === 'unannotated-fallback-sequential'),
+      'expected the strict-sequential fallback warning',
+    );
   });
 
   it('default policy is "sequential" (matches DEFAULT_FALLBACK_POLICY)', () => {
@@ -513,6 +546,36 @@ describe('Edge cases', () => {
   it('duplicate task ids throw at parse time', () => {
     const plan = makePlan('### Task 1: A', '', '### Task 1: B');
     assert.throws(() => parsePlan(plan), /duplicate task id/);
+  });
+
+  it('duplicate task ids passed directly to buildDepGraph also throw', () => {
+    // buildDepGraph is exported; callers can bypass parsePlan and construct
+    // TaskNode[] directly. The duplicate-id guard must trigger regardless.
+    const dup = [
+      {
+        id: '1',
+        name: 'A',
+        planIndex: 0,
+        creates: [],
+        modifies: [],
+        tests: [],
+        declaredDependsOn: undefined,
+      },
+      {
+        id: '1',
+        name: 'B (also id 1)',
+        planIndex: 1,
+        creates: [],
+        modifies: [],
+        tests: [],
+        declaredDependsOn: undefined,
+      },
+    ];
+    assert.throws(() => buildDepGraph(dup), DepGraphResolutionError);
+  });
+
+  it('DEFAULT_FALLBACK_POLICY is frozen (mutation throws or no-ops in strict mode)', () => {
+    assert.equal(Object.isFrozen(DEFAULT_FALLBACK_POLICY), true);
   });
 
   it('depends_on referencing a nonexistent task throws DepGraphResolutionError', () => {
@@ -578,22 +641,22 @@ describe('Edge cases', () => {
   });
 
   it('multi-touch file-overlap warns and sequences in plan-declaration order', () => {
+    // Use the opt-in parallel policy so the strict-sequential fallback
+    // doesn't mask the file-overlap inference.
     const plan = makePlan(
       '### Task 1: First',
       '',
       '**Files:**',
       '- Modify: `src/shared.ts`',
       '',
-      '**depends_on:**',
-      '',
       '### Task 2: Second',
       '',
       '**Files:**',
       '- Modify: `src/shared.ts`',
-      '',
-      '**depends_on:**',
     );
-    const g = parseAndBuildDepGraph(plan);
+    const g = parseAndBuildDepGraph(plan, {
+      assumeIndependentWithoutDependsOn: true,
+    });
     assert.ok(hasEdge(g, '1', '2'));
     const codes = g.warnings.map((w) => w.code);
     assert.ok(codes.includes('file-overlap-no-explicit-dep'));
