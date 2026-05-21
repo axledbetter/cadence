@@ -24,6 +24,13 @@ import * as readline from 'node:readline';
 import { GuardrailError } from '../core/errors.ts';
 import { foldEvents, readEvents, stateToIndexEntry } from '../core/run-state/events.ts';
 import { acquireRunLock } from '../core/run-state/lock.ts';
+import {
+  forceUnlockRepoLock,
+  formatLockDiagnostic,
+  isLockStale,
+  peekRepoLock,
+  type RepoLockMetadata,
+} from '../core/run-state/repo-lock.ts';
 import { decideReplay } from '../core/run-state/replay-decision.ts';
 import { readStateSnapshot, statePath, writeStateSnapshot } from '../core/run-state/state.ts';
 import { isValidULID } from '../core/run-state/ulid.ts';
@@ -1149,6 +1156,185 @@ function diffStates(a: RunState, b: RunState): string | null {
     }
   }
   return null;
+}
+
+// ----------------------------------------------------------------------------
+// runs cleanup --force-unlock — v7.11.0 PR 2/6 stale repo-lock recovery
+// ----------------------------------------------------------------------------
+//
+// The repo lock (Layer 2 of v7.11.0 critical-section serialization) is NEVER
+// auto-cleared — even when stale (PID dead AND >1h old). The user must
+// confirm via this subcommand. We do NOT probe holder liveness on the
+// user's behalf here: that's done inside `acquireRepoLock`, and the user
+// has already seen the stale-lock diagnostic before running this command.
+//
+// Spec: `Stale-lock handling ... Do NOT auto-clear stale locks without
+// user confirmation; a still-running process on another tty could be
+// writing.`
+
+export interface RunRunsCleanupOptions {
+  cwd?: string;
+  /** Required — currently the only operation. Future cleanup verbs (e.g.
+   *  `--gc-worktrees`) would be additional bool flags on the same subcommand. */
+  forceUnlock: boolean;
+  /** Bypass the interactive `yes` prompt. Used by scripts (not exposed in
+   *  the README as an example — we want manual operators to type yes). */
+  yes?: boolean;
+  /** Override the repo-lock path. Defaults to
+   *  `<cwd>/.claude/run-state/repo.lock`. Tests use this. */
+  lockPath?: string;
+  /** Custom stdin reader for tests. Defaults to a node:readline-bound
+   *  interface against process.stdin. */
+  promptFn?: (question: string) => Promise<string>;
+  json?: boolean;
+}
+
+/** Default user prompt — single line, expects exactly the string `yes`. */
+function defaultPromptFn(question: string): Promise<string> {
+  return new Promise(resolve => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    rl.question(question, answer => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/** Resolve the default repo-lock path relative to a given cwd. */
+function defaultRepoLockPath(cwd: string): string {
+  return path.join(cwd, '.claude', 'run-state', 'repo.lock');
+}
+
+/**
+ * `runs cleanup --force-unlock` — surface the holder, require explicit
+ * `yes` confirmation, then unlink the lock metadata + the proper-lockfile
+ * `.lock` directory. Idempotent: if nothing is held, returns success with
+ * a "nothing to do" message.
+ */
+export async function runRunsCleanup(
+  opts: RunRunsCleanupOptions,
+): Promise<RunsCliResult> {
+  const cwd = opts.cwd ?? process.cwd();
+  const json = !!opts.json;
+  const lockPath = opts.lockPath ?? defaultRepoLockPath(cwd);
+
+  if (!opts.forceUnlock) {
+    const err = new GuardrailError(
+      'runs cleanup requires an operation flag — currently only --force-unlock is supported',
+      {
+        code: 'invalid_config',
+        provider: 'runs-cli',
+        details: { lockPath },
+      },
+    );
+    return maybeEnvelope(
+      'runs cleanup',
+      json,
+      {
+        exit: 1,
+        stdout: [],
+        stderr: [`[claude-autopilot] runs cleanup: ${formatErr(err)}`],
+      },
+      { error: formatErr(err) },
+    );
+  }
+
+  // Read existing metadata. Missing meta + missing lock dir = nothing to
+  // clean; we say so and exit 0 (idempotent).
+  const meta: RepoLockMetadata | null = peekRepoLock(lockPath);
+  const lockDirExists = fs.existsSync(lockPath + '.lock');
+
+  if (!meta && !lockDirExists) {
+    return maybeEnvelope(
+      'runs cleanup',
+      json,
+      {
+        exit: 0,
+        stdout: [`runs cleanup: no repo lock at ${lockPath} — nothing to do`],
+        stderr: [],
+      },
+      { lockPath, cleared: false, reason: 'no-lock-present' },
+    );
+  }
+
+  // Print the diagnostic so the user knows exactly what they're clearing.
+  const diagnosticLines: string[] = [];
+  if (meta) {
+    diagnosticLines.push(formatLockDiagnostic(meta, lockPath));
+  } else {
+    diagnosticLines.push(
+      `Repo lock at ${lockPath} exists but has no metadata sidecar.`,
+      '(The holder likely crashed between acquiring the lock and writing metadata.)',
+    );
+  }
+
+  // Confirmation — REQUIRED in text mode, may be bypassed by --yes in
+  // scripted mode. JSON mode without --yes is rejected: we will not
+  // dump a confirmation prompt to JSON consumers.
+  if (!opts.yes) {
+    if (json) {
+      const err = new GuardrailError(
+        'runs cleanup --force-unlock requires --yes when used with --json',
+        {
+          code: 'invalid_config',
+          provider: 'runs-cli',
+          details: { lockPath },
+        },
+      );
+      return maybeEnvelope(
+        'runs cleanup',
+        json,
+        {
+          exit: 1,
+          stdout: [],
+          stderr: [`[claude-autopilot] runs cleanup: ${formatErr(err)}`],
+        },
+        { error: formatErr(err), lockPath },
+      );
+    }
+
+    // Print diagnostic to stderr so it appears even under output piping.
+    for (const line of diagnosticLines) {
+      process.stderr.write(`${line}\n`);
+    }
+    process.stderr.write('\n');
+
+    const prompt = opts.promptFn ?? defaultPromptFn;
+    const answer = (await prompt('Type "yes" to force-unlock: ')).trim();
+    if (answer !== 'yes') {
+      return {
+        exit: 1,
+        stdout: [],
+        stderr: [`runs cleanup: aborted (confirmation not "yes")`],
+      };
+    }
+  }
+
+  const removed = forceUnlockRepoLock(lockPath);
+  const stale = meta ? isLockStale(meta) : null;
+
+  return maybeEnvelope(
+    'runs cleanup',
+    json,
+    {
+      exit: 0,
+      stdout: [
+        ...diagnosticLines,
+        removed
+          ? `runs cleanup: removed repo lock at ${lockPath}`
+          : `runs cleanup: nothing to remove at ${lockPath}`,
+      ],
+      stderr: [],
+    },
+    {
+      lockPath,
+      cleared: removed,
+      ...(meta ? { previousHolder: meta, wasStale: stale } : {}),
+    },
+  );
 }
 
 // `statePath` is re-exported for convenience to keep CLI imports tidy.

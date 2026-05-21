@@ -1424,6 +1424,7 @@ switch (subcommand) {
       runRunsGc,
       runRunsDelete,
       runRunsDoctor,
+      runRunsCleanup,
     } = await import('./runs.ts');
     let result;
     switch (sub) {
@@ -1511,8 +1512,26 @@ switch (subcommand) {
         });
         break;
       }
+      case 'cleanup': {
+        // v7.11.0 PR 2/6 — stale repo-lock recovery. The only operation
+        // currently supported is `--force-unlock`. The verb is scoped
+        // under `runs` (not its own top-level command) because the
+        // intended audience is anyone who already runs `runs list` /
+        // `runs show` etc. — they shouldn't need to learn a new noun.
+        const forceUnlock = boolFlag('force-unlock');
+        const yes = boolFlag('yes');
+        const lockPath = flag('lock-path');
+        result = await runRunsCleanup({
+          cwd,
+          forceUnlock,
+          yes,
+          ...(lockPath ? { lockPath } : {}),
+          json,
+        });
+        break;
+      }
       default: {
-        process.stderr.write(`\x1b[31m[claude-autopilot] runs: unknown sub-verb "${sub}" — valid: list, show, gc, delete, doctor, watch\x1b[0m\n`);
+        process.stderr.write(`\x1b[31m[claude-autopilot] runs: unknown sub-verb "${sub}" — valid: list, show, gc, delete, doctor, watch, cleanup\x1b[0m\n`);
         process.exit(1);
       }
     }

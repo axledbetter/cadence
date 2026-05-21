@@ -19,12 +19,17 @@ import { ulid } from '../../src/core/run-state/ulid.ts';
 import {
   computeResumeLookup,
   runRunResume,
+  runRunsCleanup,
   runRunsDelete,
   runRunsDoctor,
   runRunsGc,
   runRunsList,
   runRunsShow,
 } from '../../src/cli/runs.ts';
+import {
+  acquireRepoLock,
+  forceUnlockRepoLock,
+} from '../../src/core/run-state/repo-lock.ts';
 import { RUN_STATE_SCHEMA_VERSION, type RunState } from '../../src/core/run-state/types.ts';
 
 function tmpCwd(): string {
@@ -788,6 +793,167 @@ describe('runs CLI sanity', () => {
     assert.ok(fs.existsSync(eventsPath(a.runDir)));
     const r = await runRunsShow({ runId: a.runId, cwd });
     assert.equal(r.exit, 0);
+    cleanup(cwd);
+  });
+});
+
+// ============================================================================
+// runs cleanup --force-unlock — v7.11.0 PR 2/6
+// ============================================================================
+
+describe('runRunsCleanup --force-unlock', () => {
+  /** Default lock path for a given cwd, matching the CLI's resolver. */
+  function lockPathFor(cwd: string): string {
+    return path.join(cwd, '.claude', 'run-state', 'repo.lock');
+  }
+
+  it('rejects without --force-unlock (no other operation defined yet)', async () => {
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({ cwd, forceUnlock: false });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /requires an operation flag/);
+    cleanup(cwd);
+  });
+
+  it('returns "nothing to do" when no lock is present', async () => {
+    const cwd = tmpCwd();
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath: lockPathFor(cwd),
+    });
+    assert.equal(r.exit, 0);
+    assert.match(r.stdout.join('\n'), /nothing to do/);
+    cleanup(cwd);
+  });
+
+  it('removes an orphaned lock when --yes is passed', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+    // Intentionally do NOT release — simulate a crashed process.
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 0, r.stderr.join('\n'));
+    assert.match(r.stdout.join('\n'), /removed repo lock/);
+    assert.equal(fs.existsSync(lockPath + '.lock'), false);
+    assert.equal(fs.existsSync(lockPath + '.meta.json'), false);
+
+    // After cleanup, release on the original handle should be no-op safe.
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('aborts when promptFn returns anything other than "yes"', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+
+    let prompted = false;
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => {
+        prompted = true;
+        return 'no';
+      },
+    });
+    assert.equal(prompted, true, 'prompt should have been invoked');
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /aborted/);
+    // Lock should still be there.
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('proceeds when promptFn returns "yes" (with whitespace)', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      lockPath,
+      promptFn: async () => '  yes  \n',
+    });
+    assert.equal(r.exit, 0, r.stderr.join('\n'));
+    assert.equal(fs.existsSync(lockPath + '.lock'), false);
+
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('requires --yes in --json mode (no interactive prompt under JSON)', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'r1',
+    });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      json: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    const parsed = JSON.parse(r.stdout[0]!);
+    assert.equal(parsed.status, 'fail');
+    assert.match(String(parsed.error), /requires --yes/);
+
+    await handle.release();
+    forceUnlockRepoLock(lockPath);
+    cleanup(cwd);
+  });
+
+  it('--json envelope reports cleared=true with metadata', async () => {
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'orphan-test',
+      run_id: 'rrr',
+    });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      json: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 0);
+    const parsed = JSON.parse(r.stdout[0]!);
+    assert.equal(parsed.status, 'pass');
+    assert.equal(parsed.cleared, true);
+    assert.equal(parsed.previousHolder.command, 'orphan-test');
+    assert.equal(parsed.previousHolder.run_id, 'rrr');
+
+    await handle.release();
     cleanup(cwd);
   });
 });
