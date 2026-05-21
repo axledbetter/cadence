@@ -421,6 +421,26 @@ describe('buildDepGraph — implicit dep injection', () => {
     assert.deepEqual(depsOf(g, '1'), []);
     assert.deepEqual(depsOf(g, '2'), []);
   });
+
+  it('create -> test edge: Task A creates a test file Task B lists under Test', () => {
+    // Codex pass 2 finding: read-after-write hazard. If Task A creates a
+    // test file that Task B references, B must wait for A so the file
+    // exists when B runs.
+    const plan = makePlan(
+      '### Task 1: Creates test fixture',
+      '',
+      '**Files:**',
+      '- Create: `tests/foo.test.ts`',
+      '',
+      '### Task 2: References that fixture',
+      '',
+      '**Files:**',
+      '- Create: `src/foo.ts`',
+      '- Test: `tests/foo.test.ts`',
+    );
+    const g = parseAndBuildDepGraph(plan, PARALLEL_POLICY);
+    assert.ok(hasEdge(g, '1', '2'), 'expected create -> test edge 1 -> 2');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -576,6 +596,16 @@ describe('Edge cases', () => {
 
   it('DEFAULT_FALLBACK_POLICY is frozen (mutation throws or no-ops in strict mode)', () => {
     assert.equal(Object.isFrozen(DEFAULT_FALLBACK_POLICY), true);
+  });
+
+  it('returned DepGraph container is frozen at runtime', () => {
+    // Codex pass 2 finding: bridge the gap between the readonly type
+    // contract and runtime behavior. The outer container is frozen so
+    // direct attempts to reassign `dependencies` etc. throw in strict mode.
+    // (Inner maps/sets remain mutable for hot-path perf; the type system
+    // is the primary guardrail there.)
+    const g = parseAndBuildDepGraph('### Task 1: A\n');
+    assert.equal(Object.isFrozen(g), true);
   });
 
   it('depends_on referencing a nonexistent task throws DepGraphResolutionError', () => {

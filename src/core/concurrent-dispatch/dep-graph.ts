@@ -146,11 +146,13 @@ export function buildDepGraph(
   }
 
   // Trivial empty / single-task graphs short-circuit (no edges possible).
+  // Freeze the outer container on these paths too for consistency with the
+  // full-build path below.
   if (tasks.length === 0) {
-    return { tasks, dependencies, dependents, warnings };
+    return Object.freeze({ tasks, dependencies, dependents, warnings });
   }
   if (tasks.length === 1) {
-    return { tasks, dependencies, dependents, warnings };
+    return Object.freeze({ tasks, dependencies, dependents, warnings });
   }
 
   // ---- Layer 1: explicit `depends_on:` annotations ----
@@ -221,6 +223,30 @@ export function buildDepGraph(
     }
   }
 
+  // Create -> Test edges (read-after-write hazard, Codex pass 2 finding):
+  // if Task A creates `tests/foo.test.ts` and Task B lists the same path
+  // under `Test:`, Task B must wait for Task A so the test file exists
+  // before B references it. We deliberately do NOT do the same for
+  // Modify -> Test (modifying an existing test file doesn't change
+  // existence semantics) and NOT for Test/Test pairs (same-target sharing
+  // is not a write hazard).
+  for (const t of tasks) {
+    for (const p of t.tests) {
+      const cs = creators.get(p);
+      if (cs === undefined) continue;
+      for (const creatorId of cs) {
+        if (creatorId === t.id) continue;
+        if (addEdge(dependencies, dependents, creatorId, t.id)) {
+          warnings.push({
+            code: 'implicit-create-modify-dep',
+            message: `Task ${t.id} references test "${p}" which Task ${creatorId} creates; implicit dependency injected`,
+            taskIds: [creatorId, t.id],
+          });
+        }
+      }
+    }
+  }
+
   // Same-path-touch warning: any two tasks that touch the same path without
   // a direct edge in either direction get a warning + a sequential edge in
   // plan-declaration order. This catches "both modify the same file" cases
@@ -278,7 +304,12 @@ export function buildDepGraph(
     throw new DepGraphCycleError(cycle);
   }
 
-  return { tasks, dependencies, dependents, warnings };
+  // Lightweight runtime immutability for the outer graph container. The
+  // inner `Map`/`Set` instances remain mutable at runtime (deep-freezing
+  // every set/map would be hot-path overhead the scheduler doesn't need),
+  // but the type-level `ReadonlyMap`/`ReadonlySet` contract on `DepGraph`
+  // prevents accidental mutation in type-checked downstream code.
+  return Object.freeze({ tasks, dependencies, dependents, warnings });
 }
 
 /**
