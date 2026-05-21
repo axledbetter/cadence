@@ -1049,6 +1049,59 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
     assert.equal(summary.perTask.get('t1')?.released, true);
   });
 
+  it('throws on corrupt ledger: duplicate task.budget_reserved (bugbot pass 3)', async () => {
+    const { eventsPath } = tmpRun();
+    const reserved = (seq: number) =>
+      JSON.stringify({
+        schema_version: 1,
+        seq,
+        ts: `2026-05-20T00:00:0${seq}.000Z`,
+        runId: 'r1',
+        writerId: testWriterId,
+        event: 'task.budget_reserved',
+        task_id: 't1',
+        reserved_usd: 1,
+        run_budget_remaining_after_reservation_usd: 0,
+      });
+    fs.writeFileSync(eventsPath, `${reserved(1)}\n${reserved(2)}\n`);
+    assert.throws(
+      () => BudgetReservation.replayFromEvents(eventsPath),
+      /duplicate task\.budget_reserved/,
+    );
+  });
+
+  it('throws on corrupt ledger: duplicate task.budget_released (bugbot pass 3)', async () => {
+    const { eventsPath } = tmpRun();
+    const reserved = JSON.stringify({
+      schema_version: 1,
+      seq: 1,
+      ts: '2026-05-20T00:00:00.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_reserved',
+      task_id: 't1',
+      reserved_usd: 1,
+      run_budget_remaining_after_reservation_usd: 0,
+    });
+    const released = (seq: number) =>
+      JSON.stringify({
+        schema_version: 1,
+        seq,
+        ts: `2026-05-20T00:00:0${seq}.000Z`,
+        runId: 'r1',
+        writerId: testWriterId,
+        event: 'task.budget_released',
+        task_id: 't1',
+        actual_cost_usd: 1,
+        delta_vs_reservation_usd: 0,
+      });
+    fs.writeFileSync(eventsPath, `${reserved}\n${released(2)}\n${released(3)}\n`);
+    assert.throws(
+      () => BudgetReservation.replayFromEvents(eventsPath),
+      /duplicate task\.budget_released/,
+    );
+  });
+
   it('tolerates truncated-tail by stopping at the last valid line', async () => {
     const setup = await newSetup();
     const caps: BudgetCaps = { perRunUSD: 10, perSubagentUSD: 5 };

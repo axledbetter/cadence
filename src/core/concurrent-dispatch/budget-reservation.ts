@@ -690,6 +690,20 @@ export class BudgetReservation {
               },
             );
           }
+          // Bugbot pass 3: duplicate task.budget_reserved for the same
+          // task_id would silently inflate activeReservedMicros (the
+          // runtime guard in reserve() prevents this from happening on
+          // happy paths — only corrupt logs can produce it). Fail closed.
+          if (perTask.has(ev.task_id)) {
+            throw new GuardrailError(
+              `replay: task.${ev.task_id} has duplicate task.budget_reserved (corrupt ledger)`,
+              {
+                code: 'adapter_bug',
+                provider: 'concurrent-dispatch',
+                details: { task_id: ev.task_id, event: 'task.budget_reserved' },
+              },
+            );
+          }
           const entry: ReservationEntry = {
             task_id: ev.task_id,
             reserved_usd: ev.reserved_usd,
@@ -753,6 +767,20 @@ export class BudgetReservation {
             });
             spentMicros += usdToMicros(ev.actual_cost_usd);
             break;
+          }
+          // Bugbot pass 3: duplicate task.budget_released would
+          // double-subtract from activeReservedMicros and double-add to
+          // spentMicros. Fail closed — runtime release() rejects on
+          // `prior.released` so corrupt logs are the only path.
+          if (entry.released) {
+            throw new GuardrailError(
+              `replay: task.${ev.task_id} has duplicate task.budget_released (corrupt ledger)`,
+              {
+                code: 'adapter_bug',
+                provider: 'concurrent-dispatch',
+                details: { task_id: ev.task_id, event: 'task.budget_released' },
+              },
+            );
           }
           entry.released = true;
           entry.actual_cost_usd = ev.actual_cost_usd;
