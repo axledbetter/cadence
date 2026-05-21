@@ -281,6 +281,43 @@ export function renderEventLine(
     case 'replay.override': {
       return `${ts} ${colorize(verb, 'magenta', opts.ansi)} ${ev.phase}  reason=${ev.reason}`;
     }
+    // v7.11.0 concurrent subagent dispatch events. Detailed renderers will
+    // land in PR 6 (#193) when the watch UI exposes the per-task pane.
+    // For now, render a single-line summary so existing `runs watch`
+    // sessions don't silently skip these events.
+    case 'task.started': {
+      return `${ts} ${colorize(verb, 'cyan', opts.ansi)} ${ev.task_id} branch=${ev.branch}`;
+    }
+    case 'task.budget_reserved': {
+      return `${ts} ${colorize(verb, 'cyan', opts.ansi)} ${ev.task_id} reserved=${fmtUSD(ev.reserved_usd)}`;
+    }
+    case 'task.budget_increased_reservation': {
+      return `${ts} ${colorize(verb, 'cyan', opts.ansi)} ${ev.task_id} ${fmtUSD(ev.prior_reserved_usd)}→${fmtUSD(ev.new_reserved_usd)}  ${ev.reason}`;
+    }
+    case 'task.budget_released': {
+      return `${ts} ${colorize(verb, 'cyan', opts.ansi)} ${ev.task_id} actual=${fmtUSD(ev.actual_cost_usd)}  delta=${fmtUSD(ev.delta_vs_reservation_usd)}`;
+    }
+    case 'task.completed': {
+      return `${ts} ${colorize(verb, 'green', opts.ansi)} ${ev.task_id} status=${ev.exit_status} commits=${ev.commit_shas.length}`;
+    }
+    case 'task.failed': {
+      return `${ts} ${colorize(verb, 'red', opts.ansi)} ${ev.task_id} type=${ev.error_type}  ${ev.error_message}`;
+    }
+    case 'task.merged': {
+      return `${ts} ${colorize(verb, 'green', opts.ansi)} ${ev.task_id}`;
+    }
+    case 'task.merge_conflict': {
+      return `${ts} ${colorize(verb, 'red', opts.ansi)} ${ev.task_id} paths=${ev.conflicting_paths.length}`;
+    }
+    case 'task.merge_aborted': {
+      return `${ts} ${colorize(verb, 'red', opts.ansi)} ${ev.task_id} reason=${ev.reason}`;
+    }
+    case 'task.timeout': {
+      return `${ts} ${colorize(verb, 'yellow', opts.ansi)} ${ev.task_id} ${ev.timeout_ms}ms signal=${ev.killed_signal}`;
+    }
+    case 'task.budget_halt': {
+      return `${ts} ${colorize(verb, 'red', opts.ansi)} ${ev.task_id} remaining=${fmtUSD(ev.budget_remaining_usd)} needed=${fmtUSD(ev.preflight_estimate_usd)}`;
+    }
     default: {
       // Exhaustiveness guard. New event variants must be added here so a
       // future RunEvent extension forces a compile error rather than
