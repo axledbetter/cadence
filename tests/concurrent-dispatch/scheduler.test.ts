@@ -601,6 +601,54 @@ describe('runScheduler — deadlock detection', () => {
   });
 });
 
+describe('runScheduler — runner rejecting during grace (Codex pass 3 CRITICAL #1)', () => {
+  it('still emits terminal task.timeout + task.failed when the runner rejects after abort', async () => {
+    const fx = await setupFixture();
+    try {
+      // Runner that never settles voluntarily, but rejects when aborted.
+      const rejectOnAbortRunner: SubagentRunner = async input =>
+        new Promise<SubagentResult>((_resolve, reject) => {
+          input.signal.addEventListener('abort', () => {
+            // Simulate a runner that throws while cleaning up.
+            reject(new Error('runner cleanup failed after abort'));
+          });
+        });
+      // Tighten the timeout AND grace so the test completes fast.
+      const result = await runScheduler({
+        graph: oneTaskGraph(),
+        concurrency: {
+          maxParallelSubagents: 1,
+          perSubagentTimeoutMs: 50,
+          sigkillGraceMs: 500,
+        },
+        budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+        budget: fx.budget,
+        writer: fx.writer,
+        runId: fx.runId,
+        runWorktreesDir: fx.runWorktreesDir,
+        integrationWorktree: fx.repoDir,
+        repoLockPath: fx.repoLockPath,
+        gitQueue: fx.gitQueue,
+        subagentRunner: rejectOnAbortRunner,
+      });
+      assert.equal(result.failed.length, 1);
+      const events = readEvents(fx.eventsPath);
+      assert.ok(events.find(e => e.event === 'task.timeout'), 'task.timeout should be emitted');
+      const failedEv = events.find(e => e.event === 'task.failed') as
+        | Extract<RunEvent, { event: 'task.failed' }>
+        | undefined;
+      assert.ok(failedEv, 'task.failed should be emitted');
+      assert.equal(failedEv.error_type, 'timeout');
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+/** Local alias — node:test imports get awkward when a Promise generic
+ *  parameter is `SubagentRunResult` (used inside the rejectOnAbortRunner). */
+type SubagentResult = Awaited<ReturnType<SubagentRunner>>;
+
 describe('runScheduler — concurrency config validation (Codex pass 2 WARNING)', () => {
   it('rejects non-finite perSubagentTimeoutMs', async () => {
     const fx = await setupFixture();

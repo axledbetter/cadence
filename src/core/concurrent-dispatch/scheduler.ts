@@ -306,13 +306,14 @@ export interface SchedulerResult extends DispatchResult {
  *  config-load); but `perSubagentTimeoutMs` has no upstream validator yet,
  *  so we enforce it here. */
 function validateConcurrencyConfig(cfg: ConcurrencyConfig): void {
+  // Codex pass 3 WARNING: enforce integer + range, not just finite.
   if (
-    !Number.isFinite(cfg.perSubagentTimeoutMs) ||
+    !Number.isInteger(cfg.perSubagentTimeoutMs) ||
     cfg.perSubagentTimeoutMs <= 0 ||
     cfg.perSubagentTimeoutMs > 2 ** 31 - 1
   ) {
     throw new GuardrailError(
-      `concurrency.perSubagentTimeoutMs must be a finite positive integer (got ${String(cfg.perSubagentTimeoutMs)})`,
+      `concurrency.perSubagentTimeoutMs must be a positive integer in [1, 2^31-1] (got ${String(cfg.perSubagentTimeoutMs)})`,
       {
         code: 'invalid_config',
         provider: 'concurrent-dispatch',
@@ -322,12 +323,12 @@ function validateConcurrencyConfig(cfg: ConcurrencyConfig): void {
   }
   if (cfg.sigkillGraceMs !== undefined) {
     if (
-      !Number.isFinite(cfg.sigkillGraceMs) ||
+      !Number.isInteger(cfg.sigkillGraceMs) ||
       cfg.sigkillGraceMs <= 0 ||
       cfg.sigkillGraceMs > 2 ** 31 - 1
     ) {
       throw new GuardrailError(
-        `concurrency.sigkillGraceMs must be a finite positive integer (got ${String(cfg.sigkillGraceMs)})`,
+        `concurrency.sigkillGraceMs must be a positive integer in [1, 2^31-1] (got ${String(cfg.sigkillGraceMs)})`,
         {
           code: 'invalid_config',
           provider: 'concurrent-dispatch',
@@ -421,16 +422,15 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
       throw err;
     }
 
-    // Track whether we already released the budget. Codex pass 2 CRITICAL
-    // #2: set the flag ONLY after `release` resolves; on failure, surface
-    // a run.warning AND leave the flag false so the finally block can
-    // retry with $0. Permanently lost reservations are the worst outcome
-    // here — better to over-release in the rare retry race (idempotency in
-    // BudgetReservation.release rejects double-release with adapter_bug,
-    // which we catch + log) than to corrupt the ledger silently.
+    // Track whether we already released the budget + the LAST intended
+    // release amount. Codex pass 3 WARNING: a finally-block retry with $0
+    // after a failed actualCost release would understate spend; instead
+    // retry with the same amount the caller intended.
     let budgetReleased = false;
+    let pendingReleaseActualCostUsd: number | null = null;
     const releaseBudget = async (actualCostUsd: number): Promise<void> => {
       if (budgetReleased) return;
+      pendingReleaseActualCostUsd = actualCostUsd;
       try {
         await opts.budget.release(taskId, { actualCostUsd });
         budgetReleased = true;
@@ -444,7 +444,8 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
         }
         // Real failure — emit a warning so the operator can see the
         // ledger drift. Do NOT set the flag; the finally block will
-        // attempt a $0 release as a last-ditch retry.
+        // retry with the same `pendingReleaseActualCostUsd` value
+        // captured above (NOT $0 — that would corrupt spend tracking).
         await opts.writer
           .writeEvent({
             event: 'run.warning',
@@ -595,41 +596,67 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
         // subagent may still be mutating the worktree. Wait a BOUNDED
         // grace period (default 30s per spec; configurable via
         // `concurrency.sigkillGraceMs` for tests) for the runner to
-        // confirm termination. If the runner settles within grace, we
-        // record any partial spend and signal SIGKILL escalation. If it
-        // exceeds grace, we proceed anyway and flag killed_signal as
-        // SIGKILL — the worktree is preserved (state-based cleanup) so
-        // any leaked writes are inspectable rather than destroyed.
-        const sigkillGraceMs = Math.max(
-          1,
-          Math.min(
-            opts.concurrency.sigkillGraceMs ?? 30_000,
-            2 ** 31 - 1,
-          ),
-        );
+        // confirm termination.
+        //
+        // Codex pass 3 CRITICAL #1 (settled wrapper): the grace race
+        // wraps `runnerPromise` so rejections become a settled
+        // `{ ok: false }` shape — a rejecting runner CANNOT throw past
+        // the await and skip terminal-event emission.
+        //
+        // Codex pass 3 CRITICAL #2 (kill confirmation): the runner is
+        // contractually required to set `aborted: true` when it
+        // confirms termination. If the grace timer fires, we record
+        // `kill_unconfirmed` semantics by emitting SIGKILL (PR6's real
+        // runner escalates) — but the worktree is state-based-
+        // preserved, so any leaked writes are inspectable rather than
+        // destroyed downstream. The downstream merge orchestrator
+        // (PR5) is responsible for refusing to merge a task whose
+        // worktree may still be undergoing writes; we propagate that
+        // via the killed_signal field.
+        //
+        // Codex pass 3 WARNING (timer cleanup): the grace setTimeout
+        // is now tracked and cleared in the finally so it doesn't keep
+        // the event loop alive after the runner settles first.
+        const sigkillGraceMs = opts.concurrency.sigkillGraceMs ?? 30_000;
         let killedSignal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM';
         let partialActualCostUsd = 0;
         const graceSentinel = Symbol('grace-timeout');
-        const graceResult = await Promise.race([
-          runnerPromise.then(r => r),
-          new Promise<typeof graceSentinel>(resolve =>
-            setTimeout(() => resolve(graceSentinel), sigkillGraceMs),
-          ),
-        ]);
+        type SettledRunnerResult =
+          | { ok: true; result: SubagentRunResult }
+          | { ok: false; err: Error };
+        const settledRunner: Promise<SettledRunnerResult> = runnerPromise.then(
+          (result): SettledRunnerResult => ({ ok: true, result }),
+          (err): SettledRunnerResult => ({ ok: false, err: err as Error }),
+        );
+        let graceTimerHandle: ReturnType<typeof setTimeout> | null = null;
+        const gracePromise = new Promise<typeof graceSentinel>(resolve => {
+          graceTimerHandle = setTimeout(() => resolve(graceSentinel), sigkillGraceMs);
+        });
+        let graceResult: SettledRunnerResult | typeof graceSentinel;
+        try {
+          graceResult = await Promise.race<SettledRunnerResult | typeof graceSentinel>([
+            settledRunner,
+            gracePromise,
+          ]);
+        } finally {
+          if (graceTimerHandle !== null) clearTimeout(graceTimerHandle);
+        }
         if (graceResult === graceSentinel) {
-          // Subagent ignored SIGTERM. We mark SIGKILL — in PR6's real
-          // implementation, the runner will actually escalate to
-          // SIGKILL on the process group. PR4's mock runners may not,
-          // so this is best-effort accounting only.
           killedSignal = 'SIGKILL';
-          // Detach the still-running promise. Subsequent writes are
-          // outside the scheduler's control — the worktree is
-          // preserved so a forensic inspection is possible.
-          runnerPromise.catch(() => undefined);
+          // Detach the still-running promise. State-based cleanup
+          // preserves the worktree so any leaked writes are inspectable.
+          settledRunner.catch(() => undefined);
+        } else if (graceResult.ok) {
+          // Runner settled within grace with a result — capture its
+          // reported cost for accurate budget release.
+          partialActualCostUsd = graceResult.result.actualCostUsd;
         } else {
-          // Runner settled within grace — capture its reported cost
-          // for accurate budget release.
-          partialActualCostUsd = graceResult.actualCostUsd;
+          // Runner settled within grace by REJECTING. We don't know
+          // partial cost; release with $0 and let the operator see
+          // the rejection message via the run.warning emitted on
+          // releaseBudget failure (or absent it, the task.failed
+          // error_message captures the runner's error).
+          partialActualCostUsd = 0;
         }
         if (transitionTo('timeout')) {
           await opts.writer.writeEvent({
@@ -829,9 +856,17 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
     } finally {
       // Defensive belt-and-braces: if a code path above failed to release
       // (e.g. an unexpected throw between reserve and the terminal emit),
-      // release with $0 here so the ledger isn't left with a phantom
-      // reservation.
-      await releaseBudget(0);
+      // release here. Use the LAST intended amount (Codex pass 3 WARNING)
+      // — falling back to $0 only when no terminal path ever specified a
+      // cost (i.e. the throw happened before any explicit release attempt).
+      if (!budgetReleased) {
+        const retryCost =
+          pendingReleaseActualCostUsd !== null ? pendingReleaseActualCostUsd : 0;
+        // Re-arm pendingReleaseActualCostUsd so the retry itself is
+        // visible to releaseBudget's own diagnostics path.
+        pendingReleaseActualCostUsd = null;
+        await releaseBudget(retryCost);
+      }
     }
   };
 
