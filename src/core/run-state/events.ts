@@ -474,6 +474,24 @@ function applyEvent(state: RunState, ev: RunEvent): void {
       // events.ndjson directly to compute actualSoFar — replay does not
       // need to track budget decisions for state-correctness purposes.
       break;
+    case 'task.started':
+    case 'task.budget_reserved':
+    case 'task.budget_increased_reservation':
+    case 'task.budget_released':
+    case 'task.completed':
+    case 'task.failed':
+    case 'task.merged':
+    case 'task.merge_conflict':
+    case 'task.merge_aborted':
+    case 'task.timeout':
+    case 'task.budget_halt':
+      // v7.11.0 concurrent-dispatch task events. State for these lives in
+      // the dispatch layer (budget-reservation ledger + scheduler), NOT in
+      // the per-phase RunState snapshot — phases remain the coarse-grained
+      // unit for the run-state engine. Replay is handled by
+      // `budgetReservation.replayFromEvents()` for cost reconstruction and
+      // by the scheduler's resume path for task-level state.
+      break;
     case 'phase.start': {
       state.status = 'running';
       state.currentPhaseIdx = ev.phaseIdx;

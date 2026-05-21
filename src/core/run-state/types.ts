@@ -319,6 +319,160 @@ export interface ReplayOverrideEvent extends RunEventBase {
   refsConsulted: ExternalRef[];
 }
 
+// ----------------------------------------------------------------------------
+// v7.11.0 — Concurrent subagent dispatch events (PR3/6 of the v7.11.0 spec).
+// Spec: docs/superpowers/specs/2026-05-19-v7.11.0-concurrent-subagent-execution-design.md
+// (sections "Integration with run-state engine (v6)" + "Budget reservation
+// semantics"). Authoritative inventory: 11 event types.
+//
+// All events are emitted by the scheduler under the per-run serialized event
+// writer's exclusive lock (see `serialized-writer.ts`). Subagents never write
+// directly to events.ndjson — they stream telemetry to the scheduler via IPC.
+// ----------------------------------------------------------------------------
+
+/** Subagent dispatch — emitted AFTER `task.budget_reserved` succeeds and the
+ *  worktree is created. Carries the immutable `base_sha` so resume / merge
+ *  can verify ancestry against an unforgeable reference. */
+export interface TaskStartedEvent extends RunEventBase {
+  event: 'task.started';
+  task_id: string;
+  worktree_path: string;
+  branch: string;
+  base_sha: string;
+  subagent_id: string;
+  /** ISO timestamp the subagent process was spawned. */
+  dispatched_at: string;
+  preflight_cost_estimate_usd: number;
+}
+
+/** Budget reservation — emitted atomically with the (replay → check → append
+ *  → fsync) critical section under the writer's exclusive lock. Two
+ *  concurrent callers cannot both pass the budget check. */
+export interface TaskBudgetReservedEvent extends RunEventBase {
+  event: 'task.budget_reserved';
+  task_id: string;
+  reserved_usd: number;
+  /** `perRunUSD - reserved_total` AFTER this reservation lands. May be 0,
+   *  never negative (would have failed the check). */
+  run_budget_remaining_after_reservation_usd: number;
+}
+
+/** Mid-execution reservation bump — emitted when telemetry from the subagent
+ *  shows actual cost is approaching the reservation. Re-checks `perRunUSD`
+ *  under the writer lock; halts the run if exceeded. */
+export interface TaskBudgetIncreasedReservationEvent extends RunEventBase {
+  event: 'task.budget_increased_reservation';
+  task_id: string;
+  prior_reserved_usd: number;
+  new_reserved_usd: number;
+  reason: string;
+}
+
+/** Reservation closed — emitted on task completion OR failure. The
+ *  `delta_vs_reservation_usd` (positive = under, negative = over) lets
+ *  cost-analytics consumers spot estimate drift. */
+export interface TaskBudgetReleasedEvent extends RunEventBase {
+  event: 'task.budget_released';
+  task_id: string;
+  actual_cost_usd: number;
+  delta_vs_reservation_usd: number;
+}
+
+/** Successful subagent exit with commits on the task branch. The
+ *  `task_branch_tip_sha` is the IMMUTABLE authoritative ref for all
+ *  subsequent merge / resume operations — `task_branch_name` is for
+ *  diagnostics only (branch can be tampered with). */
+export interface TaskCompletedEvent extends RunEventBase {
+  event: 'task.completed';
+  task_id: string;
+  base_sha: string;
+  task_branch_tip_sha: string;
+  task_branch_name: string;
+  /** Ordered list of commit SHAs `base_sha..tip_sha` (oldest first, from
+   *  `git rev-list --reverse`). Empty array implies `task.failed` should
+   *  have been emitted with `error_type: 'no_commits'` instead. */
+  commit_shas: string[];
+  completed_at: string;
+  actual_cost_usd: number;
+  exit_status: 'success' | 'failure';
+}
+
+/** Subagent terminal failure. `error_type` is the resume classifier — see
+ *  spec "Resume semantics" for the classification table. */
+export interface TaskFailedEvent extends RunEventBase {
+  event: 'task.failed';
+  task_id: string;
+  error_message: string;
+  error_type:
+    | 'timeout'
+    | 'no_commits'
+    | 'ancestry_violation'
+    | 'budget_exceeded'
+    | 'crash'
+    | 'other';
+  failed_at: string;
+  actual_cost_usd: number;
+}
+
+/** Cherry-pick chain landed on the integration worktree. The
+ *  `feature_branch_sha_after_merge` is recorded so the next merge can
+ *  verify preconditions (HEAD matches the last `task.merged`). */
+export interface TaskMergedEvent extends RunEventBase {
+  event: 'task.merged';
+  task_id: string;
+  feature_branch_sha_after_merge: string;
+  merged_at: string;
+}
+
+/** Cherry-pick conflict captured BEFORE `cherry-pick --abort` runs.
+ *  Diagnostics are also persisted to `conflict_report_path`
+ *  (`.claude/run-state/<run-ulid>/conflicts/<task-id>.md`). */
+export interface TaskMergeConflictEvent extends RunEventBase {
+  event: 'task.merge_conflict';
+  task_id: string;
+  conflicting_paths: string[];
+  /** Output of `git ls-files -u` — index stages 1/2/3 for each conflicted
+   *  path. Free-form lines preserved verbatim. */
+  index_stages: string[];
+  /** Output of `git status --porcelain`. */
+  porcelain: string;
+  conflict_report_path: string;
+}
+
+/** Merge precondition violation — dirty tree, wrong HEAD, in-progress
+ *  cherry-pick / rebase, or ancestry violation at merge time. Halts the
+ *  run; user must resolve before resume. */
+export interface TaskMergeAbortedEvent extends RunEventBase {
+  event: 'task.merge_aborted';
+  task_id: string;
+  reason: string;
+  precondition_violated: string;
+  occurred_at: string;
+}
+
+/** Subagent exceeded `perSubagentTimeoutMs`. Informational — the resume
+ *  classifier requires a paired `task.failed` event with
+ *  `error_type: 'timeout'` for terminal classification. */
+export interface TaskTimeoutEvent extends RunEventBase {
+  event: 'task.timeout';
+  task_id: string;
+  timeout_ms: number;
+  /** `SIGTERM` or `SIGKILL` — set to `SIGKILL` when the 30s grace after
+   *  SIGTERM elapsed without process exit. */
+  killed_signal: 'SIGTERM' | 'SIGKILL';
+}
+
+/** Pre-dispatch budget halt — emitted when `reserve()` finds remaining
+ *  budget insufficient for the new task's preflight estimate. The task
+ *  never dispatches; the scheduler halts the run with this event as the
+ *  terminal record. */
+export interface TaskBudgetHaltEvent extends RunEventBase {
+  event: 'task.budget_halt';
+  task_id: string;
+  budget_remaining_usd: number;
+  preflight_estimate_usd: number;
+}
+
 /** Discriminated union of every event variant. Add new variants here and
  *  the code that switches over `event` will type-error at compile time. */
 export type RunEvent =
@@ -336,7 +490,19 @@ export type RunEvent =
   | LockTakeoverEvent
   | IndexRebuiltEvent
   | BudgetCheckEvent
-  | ReplayOverrideEvent;
+  | ReplayOverrideEvent
+  // v7.11.0 — concurrent subagent dispatch (11 task.* events)
+  | TaskStartedEvent
+  | TaskBudgetReservedEvent
+  | TaskBudgetIncreasedReservationEvent
+  | TaskBudgetReleasedEvent
+  | TaskCompletedEvent
+  | TaskFailedEvent
+  | TaskMergedEvent
+  | TaskMergeConflictEvent
+  | TaskMergeAbortedEvent
+  | TaskTimeoutEvent
+  | TaskBudgetHaltEvent;
 
 /** Distributive Omit so the discriminated-union shape is preserved when we
  *  strip the fields the appender fills in. Plain `Omit<RunEvent, ...>`
