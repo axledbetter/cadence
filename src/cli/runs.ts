@@ -1180,8 +1180,14 @@ export interface RunRunsCleanupOptions {
   /** Bypass the interactive `yes` prompt. Used by scripts (not exposed in
    *  the README as an example — we want manual operators to type yes). */
   yes?: boolean;
-  /** Override the repo-lock path. Defaults to
-   *  `<cwd>/.claude/run-state/repo.lock`. Tests use this. */
+  /** Permit clearing a lock whose holder is still alive (or whose status
+   *  cannot be determined, e.g. cross-host). By default we refuse to clear
+   *  non-stale locks because doing so can corrupt git state under a live
+   *  writer. Codex pass 1 WARNING — see issue #189 PR review. */
+  allowActive?: boolean;
+  /** Override the repo-lock path. Tests use this. INTENTIONALLY NOT exposed
+   *  on the CLI (see `src/cli/index.ts`) — a user-supplied path would let a
+   *  typo destroy arbitrary files on disk. */
   lockPath?: string;
   /** Custom stdin reader for tests. Defaults to a node:readline-bound
    *  interface against process.stdin. */
@@ -1268,6 +1274,40 @@ export async function runRunsCleanup(
     diagnosticLines.push(
       `Repo lock at ${lockPath} exists but has no metadata sidecar.`,
       '(The holder likely crashed between acquiring the lock and writing metadata.)',
+    );
+  }
+
+  // Safety gate: refuse to clear non-stale locks without --allow-active.
+  // A stale lock (dead PID AND >1h old) is safe to clear; anything else
+  // — live holder, unknown holder (no metadata), or cross-host — is
+  // suspicious. Codex pass 1 WARNING flagged that scripted `--yes` could
+  // silently steal an active lock. (#189 PR review)
+  const stalePreCheck = meta ? isLockStale(meta) : null;
+  const isUnknownOrLive = !meta || stalePreCheck === false;
+  if (isUnknownOrLive && !opts.allowActive) {
+    const err = new GuardrailError(
+      meta
+        ? `repo lock at ${lockPath} is not stale (holder appears active) — re-run with --allow-active to override`
+        : `repo lock at ${lockPath} has no metadata sidecar — holder identity is unknown. Re-run with --allow-active to override`,
+      {
+        code: 'invalid_config',
+        provider: 'runs-cli',
+        details: { lockPath, ...(meta ? { metadata: meta } : {}) },
+      },
+    );
+    return maybeEnvelope(
+      'runs cleanup',
+      json,
+      {
+        exit: 1,
+        stdout: [],
+        stderr: [
+          ...diagnosticLines,
+          '',
+          `[claude-autopilot] runs cleanup: ${formatErr(err)}`,
+        ],
+      },
+      { error: formatErr(err), lockPath, ...(meta ? { previousHolder: meta } : {}) },
     );
   }
 

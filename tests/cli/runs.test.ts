@@ -828,7 +828,33 @@ describe('runRunsCleanup --force-unlock', () => {
     cleanup(cwd);
   });
 
-  it('removes an orphaned lock when --yes is passed', async () => {
+  it('refuses to clear a live (non-stale) lock without --allow-active', async () => {
+    // Codex pass 1 WARNING: scripted `--yes` could silently steal an
+    // active lock. Default behaviour is now to refuse non-stale locks.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    const handle = await acquireRepoLock({
+      lockPath,
+      command: 'live-test',
+      run_id: 'r1',
+    });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /not stale|--allow-active/);
+    // Lock untouched.
+    assert.ok(fs.existsSync(lockPath + '.lock'));
+
+    await handle.release();
+    cleanup(cwd);
+  });
+
+  it('removes a live lock when --allow-active --yes is set', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);
     const handle = await acquireRepoLock({
@@ -836,12 +862,14 @@ describe('runRunsCleanup --force-unlock', () => {
       command: 'orphan-test',
       run_id: 'r1',
     });
-    // Intentionally do NOT release — simulate a crashed process.
+    // Intentionally do NOT release — simulate a crashed process the user
+    // is sure is dead.
 
     const r = await runRunsCleanup({
       cwd,
       forceUnlock: true,
       yes: true,
+      allowActive: true,
       lockPath,
     });
     assert.equal(r.exit, 0, r.stderr.join('\n'));
@@ -854,7 +882,29 @@ describe('runRunsCleanup --force-unlock', () => {
     cleanup(cwd);
   });
 
-  it('aborts when promptFn returns anything other than "yes"', async () => {
+  it('refuses to clear a no-metadata lock without --allow-active', async () => {
+    // Codex pass 1 WARNING: missing metadata could be the narrow window
+    // between proper-lockfile acquisition and metadata sidecar write —
+    // i.e. a LIVE acquirer. Refuse by default.
+    const cwd = tmpCwd();
+    const lockPath = lockPathFor(cwd);
+    // Create the .lock dir without metadata.
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, '');
+    fs.mkdirSync(lockPath + '.lock', { recursive: true });
+
+    const r = await runRunsCleanup({
+      cwd,
+      forceUnlock: true,
+      yes: true,
+      lockPath,
+    });
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr.join('\n'), /no metadata|--allow-active/);
+    cleanup(cwd);
+  });
+
+  it('aborts when promptFn returns anything other than "yes" (stale lock)', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);
     const handle = await acquireRepoLock({
@@ -862,6 +912,18 @@ describe('runRunsCleanup --force-unlock', () => {
       command: 'orphan-test',
       run_id: 'r1',
     });
+    // Forge stale metadata so the safety gate doesn't refuse first.
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
 
     let prompted = false;
     const r = await runRunsCleanup({
@@ -876,14 +938,14 @@ describe('runRunsCleanup --force-unlock', () => {
     assert.equal(prompted, true, 'prompt should have been invoked');
     assert.equal(r.exit, 1);
     assert.match(r.stderr.join('\n'), /aborted/);
-    // Lock should still be there.
     assert.ok(fs.existsSync(lockPath + '.lock'));
 
     await handle.release();
+    forceUnlockRepoLock(lockPath);
     cleanup(cwd);
   });
 
-  it('proceeds when promptFn returns "yes" (with whitespace)', async () => {
+  it('proceeds when promptFn returns "yes" (with whitespace) on stale lock', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);
     const handle = await acquireRepoLock({
@@ -891,6 +953,17 @@ describe('runRunsCleanup --force-unlock', () => {
       command: 'orphan-test',
       run_id: 'r1',
     });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
 
     const r = await runRunsCleanup({
       cwd,
@@ -905,7 +978,7 @@ describe('runRunsCleanup --force-unlock', () => {
     cleanup(cwd);
   });
 
-  it('requires --yes in --json mode (no interactive prompt under JSON)', async () => {
+  it('requires --yes in --json mode for stale lock (no interactive prompt under JSON)', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);
     const handle = await acquireRepoLock({
@@ -913,6 +986,17 @@ describe('runRunsCleanup --force-unlock', () => {
       command: 'orphan-test',
       run_id: 'r1',
     });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'r1',
+        acquired_at_iso: ancient,
+      }),
+    );
 
     const r = await runRunsCleanup({
       cwd,
@@ -930,7 +1014,7 @@ describe('runRunsCleanup --force-unlock', () => {
     cleanup(cwd);
   });
 
-  it('--json envelope reports cleared=true with metadata', async () => {
+  it('--json envelope reports cleared=true with previous holder metadata', async () => {
     const cwd = tmpCwd();
     const lockPath = lockPathFor(cwd);
     const handle = await acquireRepoLock({
@@ -938,6 +1022,17 @@ describe('runRunsCleanup --force-unlock', () => {
       command: 'orphan-test',
       run_id: 'rrr',
     });
+    const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      lockPath + '.meta.json',
+      JSON.stringify({
+        pid: 0x7fffffff,
+        hostname: os.hostname(),
+        command: 'orphan-test',
+        run_id: 'rrr',
+        acquired_at_iso: ancient,
+      }),
+    );
 
     const r = await runRunsCleanup({
       cwd,

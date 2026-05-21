@@ -1518,14 +1518,22 @@ switch (subcommand) {
         // under `runs` (not its own top-level command) because the
         // intended audience is anyone who already runs `runs list` /
         // `runs show` etc. — they shouldn't need to learn a new noun.
+        //
+        // SECURITY: `--lock-path` is INTENTIONALLY NOT exposed on the
+        // CLI. The handler accepts an override for tests, but routing a
+        // user-supplied path here would let a typo or malicious script
+        // `forceUnlockRepoLock` an arbitrary `<path>` + `<path>.lock`
+        // pair on disk. The lock path is always derived from the cwd as
+        // `<cwd>/.claude/run-state/repo.lock` in production.
+        // (Codex pass 1 WARNING.)
         const forceUnlock = boolFlag('force-unlock');
         const yes = boolFlag('yes');
-        const lockPath = flag('lock-path');
+        const allowActive = boolFlag('allow-active');
         result = await runRunsCleanup({
           cwd,
           forceUnlock,
           yes,
-          ...(lockPath ? { lockPath } : {}),
+          allowActive,
           json,
         });
         break;
