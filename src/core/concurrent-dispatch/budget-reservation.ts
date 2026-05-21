@@ -647,13 +647,16 @@ export class BudgetReservation {
       return { spentMicros, activeReservedMicros, perTask, haltedTaskIds };
     }
 
-    const endsWithNewline = raw.endsWith('\n');
     const lines = raw.split('\n');
-    // `split('\n')` on a file ending in '\n' produces a trailing ''. We
-    // drop it. On a truncated tail (no trailing '\n'), the LAST line is
-    // also dropped because we can't trust it to be a complete JSON
-    // object.
-    const lastIdx = endsWithNewline ? lines.length - 2 : lines.length - 2;
+    // Always skip the final element of `split('\n')`:
+    //   - File ending in '\n' → trailing '' is dropped (no JSON to parse).
+    //   - Truncated tail (no '\n') → the last partial line is untrusted
+    //     and dropped because we can't guarantee it's a complete JSON
+    //     object. The next appendEvent will emit `run.recovery`.
+    // Both branches resolve to `lines.length - 2`, hence the bare
+    // expression (no conditional). Bugbot flagged the prior ternary as
+    // dead code — correct call.
+    const lastIdx = lines.length - 2;
 
     for (let i = 0; i <= lastIdx; i++) {
       const line = lines[i];
