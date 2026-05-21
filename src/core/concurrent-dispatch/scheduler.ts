@@ -65,6 +65,7 @@ import type { GitOperationQueue } from './git-op-queue.ts';
 import type { DepGraph, DispatchResult } from './types.ts';
 import {
   WorktreeLifecycle,
+  assertRunWorktreesDirAvailable,
   type TaskTerminalState,
   type CommitVerification,
   type CreatedTaskWorktree,
@@ -218,7 +219,8 @@ type TaskState =
   | 'timeout'
   | 'ancestry_violation'
   | 'no_commits'
-  | 'interrupted';
+  | 'interrupted'
+  | 'merge_conflict';
 
 /** Final state classification — used for state-based cleanup. The
  *  scheduler maps internal TaskState to TaskTerminalState before invoking
@@ -231,6 +233,8 @@ function toTerminalState(state: TaskState): TaskTerminalState {
       return 'timeout';
     case 'ancestry_violation':
       return 'ancestry_violation';
+    case 'merge_conflict':
+      return 'merge_conflict';
     case 'no_commits':
       return 'failed';
     case 'interrupted':
@@ -342,6 +346,12 @@ function validateConcurrencyConfig(cfg: ConcurrencyConfig): void {
 export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerResult> {
   validateConcurrencyConfig(opts.concurrency);
 
+  // Bugbot HIGH: refuse to start if `.claude/worktrees/<run-ulid>/` is
+  // already populated from a crashed prior run. The spec contract is
+  // explicit — operator must clear via `runs gc` before the scheduler
+  // touches the repo.
+  assertRunWorktreesDirAvailable(opts.runWorktreesDir);
+
   // Build the lifecycle helper. Owns its own queue reference; the scheduler
   // shares the same singleton so worktree adds serialize against any future
   // cherry-picks PR 5 enqueues.
@@ -382,6 +392,24 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
         Array.from(records.values()).map(r => [r.taskId, r.state] as const),
       ),
     };
+    // Bugbot HIGH (failures don't abort in-flight peers): when a halt
+    // fires, signal abort to every other in-flight subagent immediately
+    // so they don't continue mutating worktrees / spending budget on
+    // work that will never merge.
+    for (const rec of records.values()) {
+      if (rec.state === 'started' && rec.abort && !rec.abort.signal.aborted) {
+        rec.abort.abort(
+          new GuardrailError(
+            `scheduler halted (${diag.reason}); cancelling in-flight subagent`,
+            {
+              code: 'concurrency_lock',
+              provider: 'concurrent-dispatch',
+              details: { task_id: rec.taskId, halt_reason: diag.reason },
+            },
+          ),
+        );
+      }
+    }
   };
 
   // --- Per-task dispatch step ----------------------------------------------
@@ -826,7 +854,10 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
               // — directly overwriting the state here is intentional.
               rec.state = 'merged';
             } else if (decision.kind === 'merge_conflict') {
-              rec.state = 'failed';
+              // Bugbot MEDIUM: keep merge_conflict distinct from generic
+              // 'failed' so state-based cleanup writes the right marker
+              // file and `runs cleanup` shows the right diagnostic.
+              rec.state = 'merge_conflict';
               rec.errorMessage = `merge conflict: ${decision.reason}`;
               setHalt({
                 reason: 'task_failed',
@@ -904,12 +935,39 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
     const slots = effectiveConcurrency - inFlightPromises.size;
     const toDispatch = ready.slice(0, Math.max(0, slots));
     for (const taskId of toDispatch) {
-      const promise = dispatchTask(taskId).catch(err => {
+      // Bugbot HIGH (dispatchTask catch leaks budget): the inner try/
+      // finally in dispatchTask handles budget release for known
+      // failure paths; this outer catch is the safety net for
+      // truly-unexpected throws. We emit task.failed here so
+      // events.ndjson always carries a terminal record even when a
+      // bug in scheduler internals throws unexpectedly.
+      const promise = dispatchTask(taskId).catch(async err => {
         const rec = records.get(taskId);
-        if (rec) {
+        if (rec && rec.state === 'started') {
           rec.state = 'failed';
           rec.errorMessage = (err as Error).message;
+          // Best-effort emit task.failed so the events log is complete.
+          // dispatchTask's try/finally has already released the budget
+          // (with the last-intended cost) by the time we reach this
+          // catch — BudgetReservation.release is idempotent (rejects
+          // on already-released with adapter_bug). So emit task.failed
+          // and let the budget ledger surface any drift via its own
+          // diagnostics.
+          await opts.writer
+            .writeEvent({
+              event: 'task.failed',
+              task_id: taskId,
+              error_message: (err as Error).message,
+              error_type: 'crash',
+              failed_at: new Date().toISOString(),
+              actual_cost_usd: rec.actualCostUsd ?? 0,
+            })
+            .catch(() => undefined);
         }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} dispatch threw unexpectedly: ${(err as Error).message}`,
+        });
       });
       const tracked = promise.finally(() => {
         inFlightPromises.delete(taskId);
@@ -976,7 +1034,11 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
     break;
   }
 
-  // Drain any in-flight promises so cleanup is consistent.
+  // Drain any in-flight promises so cleanup is consistent. Bounded by
+  // sigkillGraceMs (bugbot HIGH: drain waits forever on runner) — a
+  // hung runner that ignores AbortSignal must not block scheduler exit.
+  // After the bound, we detach remaining in-flight promises; their
+  // worktrees are state-based-preserved for forensic inspection.
   if (inFlightPromises.size > 0) {
     // Abort any still-running subagents (e.g. a halt fired during dispatch
     // and others are still running). Best-effort; the runner is responsible
@@ -992,7 +1054,26 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
         );
       }
     }
-    await Promise.allSettled(Array.from(inFlightPromises.values()));
+    const drainTimeoutMs = opts.concurrency.sigkillGraceMs ?? 30_000;
+    const drainSentinel = Symbol('drain-timeout');
+    let drainTimerHandle: ReturnType<typeof setTimeout> | null = null;
+    const drainTimerPromise = new Promise<typeof drainSentinel>(resolve => {
+      drainTimerHandle = setTimeout(() => resolve(drainSentinel), drainTimeoutMs);
+    });
+    try {
+      await Promise.race([
+        Promise.allSettled(Array.from(inFlightPromises.values())),
+        drainTimerPromise,
+      ]);
+    } finally {
+      if (drainTimerHandle !== null) clearTimeout(drainTimerHandle);
+    }
+    // Detach any still-pending promises so they don't keep the event
+    // loop alive after scheduler returns. State-based cleanup runs next
+    // and preserves their worktrees.
+    for (const p of inFlightPromises.values()) {
+      p.catch(() => undefined);
+    }
   }
 
   // State-based cleanup for every terminal-state task. Wrapped in
@@ -1046,6 +1127,7 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
       case 'ancestry_violation':
       case 'no_commits':
       case 'interrupted':
+      case 'merge_conflict':
         failed.push(rec.taskId);
         break;
       case 'started':
