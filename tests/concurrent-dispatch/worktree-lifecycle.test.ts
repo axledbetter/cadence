@@ -284,6 +284,84 @@ describe('WorktreeLifecycle.cleanupTaskWorktree (state-based)', () => {
   }
 });
 
+describe('WorktreeLifecycle — task_id sanitization (Codex pass 1 CRITICAL #1)', () => {
+  it('rejects task_id containing path traversal segments', async () => {
+    const repo = setupRepo();
+    try {
+      const lifecycle = newLifecycle(repo);
+      await assert.rejects(
+        lifecycle.createTaskWorktree('../../etc-passwd'),
+        (err: Error) => {
+          assert.match(err.message, /unsafe/);
+          return true;
+        },
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('rejects task_id containing shell metacharacters', async () => {
+    const repo = setupRepo();
+    try {
+      const lifecycle = newLifecycle(repo);
+      await assert.rejects(
+        lifecycle.createTaskWorktree('foo;rm-rf'),
+        (err: Error) => {
+          assert.match(err.message, /unsafe/);
+          return true;
+        },
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('rejects task_id starting with a dash (argv ambiguity)', async () => {
+    const repo = setupRepo();
+    try {
+      const lifecycle = newLifecycle(repo);
+      await assert.rejects(
+        lifecycle.createTaskWorktree('--help'),
+        (err: Error) => {
+          assert.match(err.message, /unsafe/);
+          return true;
+        },
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('rejects task_id ending in .lock (git ref restriction)', async () => {
+    const repo = setupRepo();
+    try {
+      const lifecycle = newLifecycle(repo);
+      await assert.rejects(
+        lifecycle.createTaskWorktree('foo.lock'),
+        (err: Error) => {
+          assert.match(err.message, /\.lock/);
+          return true;
+        },
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('accepts a normal alphanumeric task_id', async () => {
+    const repo = setupRepo();
+    try {
+      const lifecycle = newLifecycle(repo);
+      const created = await lifecycle.createTaskWorktree('task-1_v2');
+      assert.ok(fs.existsSync(created.worktreePath));
+      assert.equal(created.branch, `autopilot/${repo.runId}/task-1_v2`);
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
 describe('assertRunWorktreesDirAvailable', () => {
   it('does not throw when the dir does not exist', () => {
     const tmp = path.join(os.tmpdir(), 'wl-missing-' + Date.now());

@@ -166,7 +166,43 @@ export interface SchedulerOptions {
   /** Injected subagent runner. Tests pass a mock; production passes the real
    *  spawn-and-supervise implementation from PR 6. */
   subagentRunner: SubagentRunner;
+  /** Optional merge orchestrator callback (Codex pass 1 WARNING: explicit
+   *  contract for PR5 integration). When provided, the scheduler invokes
+   *  this after every `task.completed` and uses the resulting decision to
+   *  transition the task to `merged` (unblocking downstream dispatchers).
+   *
+   *  PR 4 leaves this undefined; the scheduler halts gracefully with
+   *  `stopped_pending_merge_orchestrator` when tasks complete without a
+   *  mergeOrchestrator. PR 5 (#192) supplies the real implementation that
+   *  performs cherry-picks, emits `task.merged` / `task.merge_conflict`,
+   *  and returns the corresponding `MergeDecision`.
+   *
+   *  The callback receives the completed task's tip_sha + base_sha + branch
+   *  + commit_shas so it has everything it needs to cherry-pick without
+   *  re-reading events.ndjson. It is responsible for emitting the
+   *  `task.merged` or `task.merge_conflict` event itself — the scheduler
+   *  only uses the returned decision to update its in-memory state machine. */
+  mergeOrchestrator?: MergeOrchestrator;
 }
+
+/** Decision returned by the merge orchestrator. PR 4 declares this shape so
+ *  PR 5 can implement against a stable interface. */
+export type MergeDecision =
+  | { kind: 'merged' }
+  | { kind: 'merge_conflict'; reason: string }
+  | { kind: 'merge_aborted'; reason: string };
+
+export interface MergeOrchestratorInput {
+  taskId: string;
+  baseSha: string;
+  taskBranchTipSha: string;
+  taskBranchName: string;
+  commitShas: string[];
+}
+
+export type MergeOrchestrator = (
+  input: MergeOrchestratorInput,
+) => Promise<MergeDecision>;
 
 /** Per-task lifecycle state tracked inside the scheduler loop. */
 type TaskState =
@@ -273,14 +309,11 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
     records.set(id, { taskId: id, state: 'pending' });
   }
 
-  const effectiveConcurrency = Math.max(
-    1,
-    Math.min(
-      opts.concurrency.maxParallelSubagents,
-      opts.concurrency.providerRateLimitConcurrency ?? Number.MAX_SAFE_INTEGER,
-      allTaskIds.length || 1,
-    ),
-  );
+  const effectiveConcurrency = computeEffectiveConcurrency({
+    maxParallelSubagents: opts.concurrency.maxParallelSubagents,
+    providerRateLimitConcurrency: opts.concurrency.providerRateLimitConcurrency,
+    taskCount: allTaskIds.length,
+  });
 
   const estimate =
     opts.estimatePerTaskUsd ?? ((_id: string): number => 1.0);
@@ -303,6 +336,17 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
   };
 
   // --- Per-task dispatch step ----------------------------------------------
+  //
+  // Structured to guarantee budget reservation is ALWAYS released on every
+  // terminal path (Codex pass 1 WARNING — single try/finally around the
+  // post-reserve work). Scheduler also enforces a HARD wall-clock timeout
+  // via Promise.race: the runner is given the AbortSignal as a cooperative
+  // cancellation channel, but the scheduler does NOT depend on the runner
+  // honouring it for terminal state transitions (Codex pass 1 CRITICAL #2).
+  //
+  // Terminal state guard: once a task has transitioned out of 'started',
+  // late runner results are ignored without emitting additional terminal
+  // events (Codex pass 1 WARNING — idempotent terminal emission).
   const dispatchTask = async (taskId: string): Promise<void> => {
     const rec = records.get(taskId);
     if (!rec) return;
@@ -310,9 +354,7 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
 
     const preFlightEstimateUsd = estimate(taskId);
 
-    // (1) Reserve budget. The reservation is atomic against concurrent
-    // reservations via the writer's exclusive lock. A budget halt here
-    // terminates the run.
+    // (1) Reserve budget.
     try {
       await opts.budget.reserve(taskId, {
         preFlightEstimateUsd,
@@ -331,201 +373,315 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
       throw err;
     }
 
-    // (2) Create worktree. Wrap in repo lock so a second claude-autopilot
-    // invocation cannot interleave a `git worktree add` on the same repo.
-    let created: CreatedTaskWorktree;
+    // Track whether we already released the budget. The finally block uses
+    // this to release with $0 on otherwise-unreleased paths (defensive
+    // belt-and-braces).
+    let budgetReleased = false;
+    const releaseBudget = async (actualCostUsd: number): Promise<void> => {
+      if (budgetReleased) return;
+      budgetReleased = true;
+      await opts.budget
+        .release(taskId, { actualCostUsd })
+        .catch(() => undefined);
+    };
+
+    // Track whether a terminal event has been emitted for this task. Once
+    // set, late runner results are silently swallowed.
+    let terminalEmitted = false;
+    const transitionTo = (state: TaskState): boolean => {
+      if (terminalEmitted) return false;
+      terminalEmitted = true;
+      rec.state = state;
+      return true;
+    };
+
     try {
-      created = await withRepoLock(
-        {
-          lockPath: opts.repoLockPath,
-          command: 'scheduler create-worktree',
-          run_id: opts.runId,
-        },
-        () => lifecycle.createTaskWorktree(taskId),
-      );
-    } catch (err) {
-      // Release the budget reservation we just took (release with $0 actual
-      // spend, then mark failed). The ledger will record the unused
-      // reservation.
-      await opts.budget.release(taskId, { actualCostUsd: 0 }).catch(() => undefined);
-      rec.state = 'failed';
-      rec.errorMessage = (err as Error).message;
-      await emitTaskFailed(opts, taskId, {
-        errorMessage: rec.errorMessage,
-        errorType: 'crash',
-        actualCostUsd: 0,
+      // (2) Create worktree.
+      let created: CreatedTaskWorktree;
+      try {
+        created = await withRepoLock(
+          {
+            lockPath: opts.repoLockPath,
+            command: 'scheduler create-worktree',
+            run_id: opts.runId,
+          },
+          () => lifecycle.createTaskWorktree(taskId),
+        );
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (transitionTo('failed')) {
+          rec.errorMessage = msg;
+          await emitTaskFailed(opts, taskId, {
+            errorMessage: msg,
+            errorType: 'crash',
+            actualCostUsd: 0,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} worktree creation failed: ${msg}`,
+        });
+        return;
+      }
+      rec.worktree = created;
+
+      // (3) Emit task.started.
+      await opts.writer.writeEvent({
+        event: 'task.started',
+        task_id: taskId,
+        worktree_path: created.worktreePath,
+        branch: created.branch,
+        base_sha: created.baseSha,
+        subagent_id: `subagent-${opts.runId}-${taskId}`,
+        dispatched_at: new Date().toISOString(),
+        preflight_cost_estimate_usd: preFlightEstimateUsd,
       });
-      setHalt({
-        reason: 'task_failed',
-        detail: `task ${taskId} worktree creation failed: ${rec.errorMessage}`,
-      });
-      return;
-    }
-    rec.worktree = created;
 
-    // (3) Emit task.started.
-    await opts.writer.writeEvent({
-      event: 'task.started',
-      task_id: taskId,
-      worktree_path: created.worktreePath,
-      branch: created.branch,
-      base_sha: created.baseSha,
-      // PR 4 doesn't know what subagent_id PR 6 will assign. Stamp a
-      // synthetic deterministic id so events.ndjson is self-consistent.
-      subagent_id: `subagent-${opts.runId}-${taskId}`,
-      dispatched_at: new Date().toISOString(),
-      preflight_cost_estimate_usd: preFlightEstimateUsd,
-    });
+      // (4) Spawn subagent under AbortController. Hard scheduler-level
+      // timeout via Promise.race — we do NOT block on the runner honouring
+      // the AbortSignal. If the runner is hung, the timeout promise
+      // resolves first and the scheduler emits terminal events even while
+      // the runner's promise is still in-flight. The runner's eventual
+      // settlement is swallowed by the terminal-state guard.
+      const abort = new AbortController();
+      rec.abort = abort;
 
-    // (4) Spawn subagent under AbortController + per-task timeout.
-    const abort = new AbortController();
-    rec.abort = abort;
-    const timeoutHandle = setTimeout(() => {
-      abort.abort(
-        new GuardrailError(`task ${taskId} exceeded perSubagentTimeoutMs`, {
-          code: 'transient_network',
-          provider: 'concurrent-dispatch',
-          details: { task_id: taskId, timeout_ms: opts.concurrency.perSubagentTimeoutMs },
-        }),
+      type TimeoutSentinel = { __timeout: true };
+      const timeoutSentinel: TimeoutSentinel = { __timeout: true };
+      const timeoutMs = opts.concurrency.perSubagentTimeoutMs;
+      // Sanitize timeoutMs — clamp to a safe range; out-of-range values
+      // would otherwise produce a setTimeout warning + unpredictable
+      // behaviour.
+      const safeTimeoutMs = Math.max(
+        1,
+        Math.min(
+          Number.isFinite(timeoutMs) ? timeoutMs : 30 * 60_000,
+          2 ** 31 - 1, // setTimeout max
+        ),
       );
-    }, opts.concurrency.perSubagentTimeoutMs);
 
-    let runnerResult: SubagentRunResult;
-    try {
-      runnerResult = await opts.subagentRunner({
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      const timeoutPromise = new Promise<TimeoutSentinel>(resolve => {
+        timeoutHandle = setTimeout(() => {
+          // Fire AbortController so the runner has a chance to clean up
+          // cooperatively. We do NOT wait for it — the scheduler proceeds
+          // to terminal-event emission immediately.
+          abort.abort(
+            new GuardrailError(`task ${taskId} exceeded perSubagentTimeoutMs`, {
+              code: 'transient_network',
+              provider: 'concurrent-dispatch',
+              details: { task_id: taskId, timeout_ms: safeTimeoutMs },
+            }),
+          );
+          resolve(timeoutSentinel);
+        }, safeTimeoutMs);
+      });
+
+      const runnerPromise: Promise<SubagentRunResult> = opts.subagentRunner({
         taskId,
         worktreePath: created.worktreePath,
         branch: created.branch,
         baseSha: created.baseSha,
         signal: abort.signal,
-        timeoutMs: opts.concurrency.perSubagentTimeoutMs,
-      });
-    } catch (err) {
-      runnerResult = {
+        timeoutMs: safeTimeoutMs,
+      }).catch((err): SubagentRunResult => ({
         exitStatus: 'failure',
         actualCostUsd: 0,
         errorMessage: (err as Error).message,
         aborted: abort.signal.aborted,
-      };
+      }));
+
+      const raceResult = await Promise.race<SubagentRunResult | TimeoutSentinel>([
+        runnerPromise,
+        timeoutPromise,
+      ]);
+
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+
+      // Detect timeout via sentinel — robust against late runner returns.
+      if ((raceResult as TimeoutSentinel).__timeout === true) {
+        if (transitionTo('timeout')) {
+          await opts.writer.writeEvent({
+            event: 'task.timeout',
+            task_id: taskId,
+            timeout_ms: safeTimeoutMs,
+            killed_signal: 'SIGTERM',
+          });
+          await releaseBudget(0);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage: `task ${taskId} timed out after ${safeTimeoutMs}ms (scheduler hard timeout)`,
+            errorType: 'timeout',
+            actualCostUsd: 0,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} timed out`,
+        });
+        // Detach the runner promise. Late settlement is ignored by the
+        // terminal-state guard above.
+        runnerPromise.catch(() => undefined);
+        return;
+      }
+
+      const runnerResult = raceResult as SubagentRunResult;
+      rec.actualCostUsd = runnerResult.actualCostUsd;
+
+      // (5) If the runner itself reported abort (timeout the runner saw
+      // first), emit the same dual-emit pair. This covers the case where
+      // the runner exits abort-aware before the scheduler's timer fired.
+      if (runnerResult.aborted === true) {
+        if (transitionTo('timeout')) {
+          await opts.writer.writeEvent({
+            event: 'task.timeout',
+            task_id: taskId,
+            timeout_ms: safeTimeoutMs,
+            killed_signal: 'SIGTERM',
+          });
+          await releaseBudget(runnerResult.actualCostUsd);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage:
+              runnerResult.errorMessage ??
+              `task ${taskId} aborted (runner reported abort)`,
+            errorType: 'timeout',
+            actualCostUsd: runnerResult.actualCostUsd,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} aborted (runner-reported)`,
+        });
+        return;
+      }
+
+      // (6) Verify commits — ancestry + no-commits. Always under the
+      // gitQueue.
+      const verification = await lifecycle.verifyTaskCommits(taskId, created.baseSha);
+      rec.verification = verification;
+
+      // (7) Map verification + runner outcome onto task.completed or
+      // task.failed.
+      if (verification.kind === 'ancestry_violation') {
+        if (transitionTo('ancestry_violation')) {
+          await releaseBudget(runnerResult.actualCostUsd);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage: verification.reason,
+            errorType: 'ancestry_violation',
+            actualCostUsd: runnerResult.actualCostUsd,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} produced an ancestry violation`,
+        });
+        return;
+      }
+
+      if (verification.kind === 'no_commits') {
+        if (transitionTo('no_commits')) {
+          await releaseBudget(runnerResult.actualCostUsd);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage:
+              runnerResult.errorMessage ??
+              `task ${taskId} produced no commits (base..tip is empty)`,
+            errorType: 'no_commits',
+            actualCostUsd: runnerResult.actualCostUsd,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} produced no commits`,
+        });
+        return;
+      }
+
+      // verification.kind === 'ok' — but runner might have reported
+      // failure even though commits landed. Honour exitStatus.
+      if (runnerResult.exitStatus === 'failure') {
+        if (transitionTo('failed')) {
+          await releaseBudget(runnerResult.actualCostUsd);
+          await emitTaskFailed(opts, taskId, {
+            errorMessage:
+              runnerResult.errorMessage ??
+              `task ${taskId} subagent reported failure`,
+            errorType: 'crash',
+            actualCostUsd: runnerResult.actualCostUsd,
+          });
+        }
+        setHalt({
+          reason: 'task_failed',
+          detail: `task ${taskId} subagent reported failure`,
+        });
+        return;
+      }
+
+      // Happy path — emit task.completed with the IMMUTABLE tip_sha.
+      if (transitionTo('completed')) {
+        await releaseBudget(runnerResult.actualCostUsd);
+        await opts.writer.writeEvent({
+          event: 'task.completed',
+          task_id: taskId,
+          base_sha: created.baseSha,
+          task_branch_tip_sha: verification.tipSha,
+          task_branch_name: created.branch,
+          commit_shas: verification.commitShas,
+          completed_at: new Date().toISOString(),
+          actual_cost_usd: runnerResult.actualCostUsd,
+          exit_status: 'success',
+        });
+
+        // (8) Invoke merge orchestrator if provided (PR 5 integration
+        // point). Without one, the task stays in 'completed' and the
+        // scheduler eventually halts with stopped_pending_merge_orchestrator.
+        if (opts.mergeOrchestrator) {
+          try {
+            const decision = await opts.mergeOrchestrator({
+              taskId,
+              baseSha: created.baseSha,
+              taskBranchTipSha: verification.tipSha,
+              taskBranchName: created.branch,
+              commitShas: verification.commitShas,
+            });
+            if (decision.kind === 'merged') {
+              // Transition out of the terminal 'completed' state. The
+              // mergeOrchestrator is the only legitimate path to 'merged'
+              // — directly overwriting the state here is intentional.
+              rec.state = 'merged';
+            } else if (decision.kind === 'merge_conflict') {
+              rec.state = 'failed';
+              rec.errorMessage = `merge conflict: ${decision.reason}`;
+              setHalt({
+                reason: 'task_failed',
+                detail: `task ${taskId} merge conflict: ${decision.reason}`,
+              });
+            } else {
+              rec.state = 'failed';
+              rec.errorMessage = `merge aborted: ${decision.reason}`;
+              setHalt({
+                reason: 'task_failed',
+                detail: `task ${taskId} merge aborted: ${decision.reason}`,
+              });
+            }
+          } catch (err) {
+            // Orchestrator threw — treat as merge_aborted with the throw
+            // message. Halt the run.
+            const msg = (err as Error).message;
+            rec.state = 'failed';
+            rec.errorMessage = `merge orchestrator threw: ${msg}`;
+            setHalt({
+              reason: 'task_failed',
+              detail: `task ${taskId} merge orchestrator failed: ${msg}`,
+            });
+          }
+        }
+      }
     } finally {
-      clearTimeout(timeoutHandle);
+      // Defensive belt-and-braces: if a code path above failed to release
+      // (e.g. an unexpected throw between reserve and the terminal emit),
+      // release with $0 here so the ledger isn't left with a phantom
+      // reservation.
+      await releaseBudget(0);
     }
-
-    rec.actualCostUsd = runnerResult.actualCostUsd;
-
-    // (5) Timeout: emit task.timeout BEFORE task.failed, per spec dual-emit
-    // contract. We detect timeout via abort.signal.aborted — the
-    // AbortController firing because of the timer is the canonical timeout
-    // signal. (A caller-initiated abort would also set this, but the
-    // scheduler doesn't currently support external aborts in PR 4.)
-    const timedOut = runnerResult.aborted === true || abort.signal.aborted;
-    if (timedOut) {
-      await opts.writer.writeEvent({
-        event: 'task.timeout',
-        task_id: taskId,
-        timeout_ms: opts.concurrency.perSubagentTimeoutMs,
-        // We can't distinguish SIGTERM vs SIGKILL here without subprocess
-        // telemetry; mark SIGTERM (the first signal the runner sends).
-        // PR 6's real runner will refine this if it observed an actual
-        // SIGKILL escalation.
-        killed_signal: 'SIGTERM',
-      });
-      // Release the reservation with the actual cost recorded so far.
-      await opts.budget
-        .release(taskId, { actualCostUsd: runnerResult.actualCostUsd })
-        .catch(() => undefined);
-      await emitTaskFailed(opts, taskId, {
-        errorMessage:
-          runnerResult.errorMessage ??
-          `task ${taskId} timed out after ${opts.concurrency.perSubagentTimeoutMs}ms`,
-        errorType: 'timeout',
-        actualCostUsd: runnerResult.actualCostUsd,
-      });
-      rec.state = 'timeout';
-      setHalt({
-        reason: 'task_failed',
-        detail: `task ${taskId} timed out`,
-      });
-      return;
-    }
-
-    // (6) Verify commits — ancestry + no-commits. Always under the gitQueue.
-    const verification = await lifecycle.verifyTaskCommits(taskId, created.baseSha);
-    rec.verification = verification;
-
-    // (7) Map verification + runner outcome onto task.completed or task.failed.
-    if (verification.kind === 'ancestry_violation') {
-      await opts.budget
-        .release(taskId, { actualCostUsd: runnerResult.actualCostUsd })
-        .catch(() => undefined);
-      await emitTaskFailed(opts, taskId, {
-        errorMessage: verification.reason,
-        errorType: 'ancestry_violation',
-        actualCostUsd: runnerResult.actualCostUsd,
-      });
-      rec.state = 'ancestry_violation';
-      setHalt({
-        reason: 'task_failed',
-        detail: `task ${taskId} produced an ancestry violation`,
-      });
-      return;
-    }
-
-    if (verification.kind === 'no_commits') {
-      await opts.budget
-        .release(taskId, { actualCostUsd: runnerResult.actualCostUsd })
-        .catch(() => undefined);
-      await emitTaskFailed(opts, taskId, {
-        errorMessage:
-          runnerResult.errorMessage ??
-          `task ${taskId} produced no commits (base..tip is empty)`,
-        errorType: 'no_commits',
-        actualCostUsd: runnerResult.actualCostUsd,
-      });
-      rec.state = 'no_commits';
-      setHalt({
-        reason: 'task_failed',
-        detail: `task ${taskId} produced no commits`,
-      });
-      return;
-    }
-
-    // verification.kind === 'ok' — but the runner itself might have
-    // reported failure even though commits landed. Honour the runner's
-    // exitStatus.
-    if (runnerResult.exitStatus === 'failure') {
-      await opts.budget
-        .release(taskId, { actualCostUsd: runnerResult.actualCostUsd })
-        .catch(() => undefined);
-      await emitTaskFailed(opts, taskId, {
-        errorMessage: runnerResult.errorMessage ?? `task ${taskId} subagent reported failure`,
-        errorType: 'crash',
-        actualCostUsd: runnerResult.actualCostUsd,
-      });
-      rec.state = 'failed';
-      setHalt({
-        reason: 'task_failed',
-        detail: `task ${taskId} subagent reported failure`,
-      });
-      return;
-    }
-
-    // Happy path — emit task.completed with the IMMUTABLE tip_sha.
-    await opts.budget
-      .release(taskId, { actualCostUsd: runnerResult.actualCostUsd })
-      .catch(() => undefined);
-    await opts.writer.writeEvent({
-      event: 'task.completed',
-      task_id: taskId,
-      base_sha: created.baseSha,
-      task_branch_tip_sha: verification.tipSha,
-      task_branch_name: created.branch,
-      commit_shas: verification.commitShas,
-      completed_at: new Date().toISOString(),
-      actual_cost_usd: runnerResult.actualCostUsd,
-      exit_status: 'success',
-    });
-    rec.state = 'completed';
   };
 
   // --- Outer scheduling loop ------------------------------------------------
@@ -653,16 +809,25 @@ export async function runScheduler(opts: SchedulerOptions): Promise<SchedulerRes
     await Promise.allSettled(Array.from(inFlightPromises.values()));
   }
 
-  // State-based cleanup for every terminal-state task. (Only `merged` tasks
-  // get worktree + branch removed; everything else stays for inspection.)
-  // PR 4 has no `merged` state — that's PR 5 — so this primarily exercises
-  // the "preserve" branch. Tests still exercise the `merged` branch by
-  // synthesizing the state.
+  // State-based cleanup for every terminal-state task. Wrapped in
+  // withRepoLock (Codex pass 1 WARNING) — `git worktree remove` and
+  // `git branch -D` are repo-level mutations that can race with another
+  // claude-autopilot invocation (e.g. `runs cleanup` running concurrently).
+  // Only `merged` removes worktree+branch; others write a marker file in
+  // place which is non-mutating from git's perspective but still benefits
+  // from serialization vs concurrent inspectors.
   for (const rec of records.values()) {
     if (!rec.worktree) continue;
     const terminal = toTerminalState(rec.state);
     try {
-      await lifecycle.cleanupTaskWorktree(rec.taskId, terminal);
+      await withRepoLock(
+        {
+          lockPath: opts.repoLockPath,
+          command: 'scheduler cleanup-worktree',
+          run_id: opts.runId,
+        },
+        () => lifecycle.cleanupTaskWorktree(rec.taskId, terminal),
+      );
     } catch (err) {
       // Cleanup failures are non-fatal — record on a warning event but
       // don't change the overall halt reason.
@@ -753,21 +918,32 @@ async function emitTaskFailed(
  *  effective = min(maxParallelSubagents, providerRateLimitConcurrency,
  *                  taskCount).
  *
- *  Floor at 1 so a misconfigured caller (e.g. taskCount=0) doesn't deadlock
- *  on a zero-slot scheduler. */
+ *  Defensive clamping (Codex pass 1 WARNING): even though the caller is
+ *  expected to validate `maxParallelSubagents` is `1..8` at config-load,
+ *  this function tolerates garbage inputs (`NaN`, `Infinity`, negative,
+ *  non-integer) and clamps them to safe values. This prevents the scheduler
+ *  from busy-looping on `effective=0` or over-dispatching on `effective=Infinity`.
+ *
+ *  Returns `1` minimum so a misconfigured caller never deadlocks the
+ *  scheduler. */
 export function computeEffectiveConcurrency(args: {
   maxParallelSubagents: number;
   providerRateLimitConcurrency?: number;
   taskCount: number;
 }): number {
-  return Math.max(
-    1,
-    Math.min(
-      args.maxParallelSubagents,
-      args.providerRateLimitConcurrency ?? Number.MAX_SAFE_INTEGER,
-      args.taskCount || 1,
-    ),
-  );
+  const clampPositiveInt = (n: number, fallback: number): number => {
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.max(1, Math.floor(n));
+  };
+  const maxParallel = clampPositiveInt(args.maxParallelSubagents, 1);
+  const providerLimit =
+    args.providerRateLimitConcurrency === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : clampPositiveInt(args.providerRateLimitConcurrency, Number.MAX_SAFE_INTEGER);
+  const taskCount = Number.isFinite(args.taskCount) && args.taskCount > 0
+    ? Math.floor(args.taskCount)
+    : 1;
+  return Math.max(1, Math.min(maxParallel, providerLimit, taskCount));
 }
 
 // Suppress unused — these types are exported so callers can construct

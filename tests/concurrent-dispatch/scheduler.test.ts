@@ -221,6 +221,53 @@ describe('computeEffectiveConcurrency', () => {
       1,
     );
   });
+
+  // Codex pass 1 WARNING — defensive clamping for garbage inputs.
+  it('clamps NaN maxParallelSubagents to 1', () => {
+    assert.equal(
+      computeEffectiveConcurrency({ maxParallelSubagents: Number.NaN, taskCount: 10 }),
+      1,
+    );
+  });
+
+  it('clamps negative maxParallelSubagents to 1', () => {
+    assert.equal(
+      computeEffectiveConcurrency({ maxParallelSubagents: -3, taskCount: 10 }),
+      1,
+    );
+  });
+
+  it('clamps Infinity maxParallelSubagents to the safe fallback (1)', () => {
+    // Infinity is non-finite — `clampPositiveInt` treats it as garbage
+    // input and falls back to 1 (the conservative floor). The caller is
+    // expected to validate via the JSON schema before reaching us; this
+    // is the last line of defence.
+    assert.equal(
+      computeEffectiveConcurrency({
+        maxParallelSubagents: Number.POSITIVE_INFINITY,
+        taskCount: 7,
+      }),
+      1,
+    );
+  });
+
+  it('floors non-integer maxParallelSubagents', () => {
+    assert.equal(
+      computeEffectiveConcurrency({ maxParallelSubagents: 3.9, taskCount: 10 }),
+      3,
+    );
+  });
+
+  it('ignores invalid providerRateLimitConcurrency', () => {
+    assert.equal(
+      computeEffectiveConcurrency({
+        maxParallelSubagents: 3,
+        providerRateLimitConcurrency: Number.NaN,
+        taskCount: 10,
+      }),
+      3,
+    );
+  });
 });
 
 describe('runScheduler — happy path single task', () => {
@@ -409,6 +456,107 @@ describe('runScheduler — timeout', () => {
       const tsTimeout = events.indexOf(timeoutEv);
       const tsFailed = events.indexOf(failedEv);
       assert.ok(tsTimeout < tsFailed, 'task.timeout must precede task.failed');
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+describe('runScheduler — hard scheduler timeout (Codex pass 1 CRITICAL #2)', () => {
+  it('emits terminal events even when the runner ignores the AbortSignal', async () => {
+    const fx = await setupFixture();
+    try {
+      // Runner that completely ignores the signal — never resolves.
+      const stubbornRunner: SubagentRunner = () => new Promise<never>(() => {});
+      const result = await runScheduler({
+        graph: oneTaskGraph(),
+        concurrency: {
+          maxParallelSubagents: 1,
+          perSubagentTimeoutMs: 100,
+        },
+        budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+        budget: fx.budget,
+        writer: fx.writer,
+        runId: fx.runId,
+        runWorktreesDir: fx.runWorktreesDir,
+        integrationWorktree: fx.repoDir,
+        repoLockPath: fx.repoLockPath,
+        gitQueue: fx.gitQueue,
+        subagentRunner: stubbornRunner,
+      });
+      assert.equal(result.failed.length, 1);
+      const events = readEvents(fx.eventsPath);
+      assert.ok(events.find(e => e.event === 'task.timeout'), 'task.timeout must be emitted');
+      const failedEv = events.find(e => e.event === 'task.failed') as
+        | Extract<RunEvent, { event: 'task.failed' }>
+        | undefined;
+      assert.ok(failedEv, 'task.failed must be emitted');
+      assert.equal(failedEv.error_type, 'timeout');
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+describe('runScheduler — mergeOrchestrator integration (Codex pass 1 WARNING)', () => {
+  it('transitions tasks to merged via callback and dispatches downstream deps', async () => {
+    const fx = await setupFixture();
+    try {
+      const merged: string[] = [];
+      const mergeOrchestrator = async (input: { taskId: string }): Promise<{ kind: 'merged' }> => {
+        merged.push(input.taskId);
+        return { kind: 'merged' };
+      };
+      const result = await runScheduler({
+        graph: chainedGraph(),
+        concurrency: { maxParallelSubagents: 2, perSubagentTimeoutMs: 10_000 },
+        budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+        budget: fx.budget,
+        writer: fx.writer,
+        runId: fx.runId,
+        runWorktreesDir: fx.runWorktreesDir,
+        integrationWorktree: fx.repoDir,
+        repoLockPath: fx.repoLockPath,
+        gitQueue: fx.gitQueue,
+        subagentRunner: successfulRunner({ actualCostUsd: 0.5 }),
+        mergeOrchestrator,
+      });
+      assert.deepEqual(result.merged.sort(), ['1', '2']);
+      assert.equal(result.completedUnmerged.length, 0);
+      assert.equal(result.diagnostics.reason, 'all_tasks_merged');
+      // mergeOrchestrator was called for BOTH tasks.
+      assert.deepEqual(merged.sort(), ['1', '2']);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it('halts run when mergeOrchestrator reports merge_conflict', async () => {
+    const fx = await setupFixture();
+    try {
+      const mergeOrchestrator = async (): Promise<{ kind: 'merge_conflict'; reason: string }> => ({
+        kind: 'merge_conflict',
+        reason: 'simulated conflict',
+      });
+      const result = await runScheduler({
+        graph: chainedGraph(),
+        concurrency: { maxParallelSubagents: 2, perSubagentTimeoutMs: 10_000 },
+        budgetCaps: { perRunUSD: 10, perSubagentUSD: 3 },
+        budget: fx.budget,
+        writer: fx.writer,
+        runId: fx.runId,
+        runWorktreesDir: fx.runWorktreesDir,
+        integrationWorktree: fx.repoDir,
+        repoLockPath: fx.repoLockPath,
+        gitQueue: fx.gitQueue,
+        subagentRunner: successfulRunner({ actualCostUsd: 0.5 }),
+        mergeOrchestrator,
+      });
+      // Task 1 fails the merge; Task 2 never dispatches.
+      assert.equal(result.merged.length, 0);
+      assert.equal(result.failed.length, 1);
+      assert.equal(result.notStarted.length, 1);
+      assert.equal(result.diagnostics.reason, 'task_failed');
     } finally {
       await fx.cleanup();
     }

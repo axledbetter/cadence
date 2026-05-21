@@ -63,6 +63,9 @@ export {
 } from './scheduler.ts';
 export type {
   ConcurrencyConfig,
+  MergeDecision,
+  MergeOrchestrator,
+  MergeOrchestratorInput,
   SchedulerDiagnostics,
   SchedulerOptions,
   SchedulerResult,

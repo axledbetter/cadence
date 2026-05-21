@@ -102,6 +102,61 @@ export interface WorktreeLifecycleOptions {
 }
 
 /**
+ * Codex pass 1 CRITICAL #1: task IDs are caller-supplied (parsed from plan
+ * markdown). Before we splice them into filesystem paths or git refs we
+ * enforce a strict allowlist: ASCII alphanumerics, `.`, `_`, and `-`, length
+ * 1..80, must start with an alphanumeric. This rejects:
+ *
+ *   - path traversal: "../../outside"
+ *   - argv ambiguity:  "--help"
+ *   - ref tricks:      "refs/heads/main"
+ *   - shell metachars: anything with `;|&$(){}<>` or whitespace
+ *   - lock-file collisions: ".lock"-suffixed names
+ *
+ * Throws GuardrailError(user_input) with a clear hint when the id is unsafe.
+ */
+const SAFE_TASK_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
+function assertSafeTaskId(taskId: string): void {
+  if (typeof taskId !== 'string' || !SAFE_TASK_ID_RE.test(taskId)) {
+    throw new GuardrailError(
+      `task_id "${taskId}" is unsafe — must match ${SAFE_TASK_ID_RE.source}`,
+      {
+        code: 'user_input',
+        provider: 'concurrent-dispatch',
+        details: { task_id: taskId, allowed_pattern: SAFE_TASK_ID_RE.source },
+      },
+    );
+  }
+  // Git refuses .lock suffix on ref names; we reject early for a clearer error.
+  if (taskId.endsWith('.lock')) {
+    throw new GuardrailError(
+      `task_id "${taskId}" cannot end with .lock (git ref restriction)`,
+      {
+        code: 'user_input',
+        provider: 'concurrent-dispatch',
+        details: { task_id: taskId },
+      },
+    );
+  }
+}
+
+/** Same allowlist applied to the run id (which is normally a ULID, but we
+ *  defensively validate it too since it gets spliced into branch names and
+ *  paths). */
+function assertSafeRunId(runId: string): void {
+  if (typeof runId !== 'string' || !SAFE_TASK_ID_RE.test(runId)) {
+    throw new GuardrailError(
+      `run_id "${runId}" is unsafe — must match ${SAFE_TASK_ID_RE.source}`,
+      {
+        code: 'user_input',
+        provider: 'concurrent-dispatch',
+        details: { run_id: runId },
+      },
+    );
+  }
+}
+
+/**
  * Manages per-task worktree creation, ancestry validation, and state-based
  * cleanup. One instance per scheduler run.
  *
@@ -110,18 +165,37 @@ export interface WorktreeLifecycleOptions {
  * serialization is the scheduler's responsibility (via `withRepoLock`).
  */
 export class WorktreeLifecycle {
-  constructor(private readonly opts: WorktreeLifecycleOptions) {}
+  constructor(private readonly opts: WorktreeLifecycleOptions) {
+    assertSafeRunId(opts.runId);
+  }
 
   /** Branch name we'll create / clean up for a given task. Exposed so the
    *  scheduler can include it in `task.started` / `task.completed` without
    *  duplicating the convention. */
   branchFor(taskId: string): string {
+    assertSafeTaskId(taskId);
     return `autopilot/${this.opts.runId}/${taskId}`;
   }
 
-  /** Absolute path of the per-task worktree. */
+  /** Absolute path of the per-task worktree. Resolved to an absolute path
+   *  and asserted to remain UNDER `runWorktreesDir` so a maliciously-crafted
+   *  task id can't escape via `..` segments (defensive — `assertSafeTaskId`
+   *  rejects `..` upstream, but this is the second line of defence). */
   worktreePathFor(taskId: string): string {
-    return path.join(this.opts.runWorktreesDir, taskId);
+    assertSafeTaskId(taskId);
+    const candidate = path.resolve(this.opts.runWorktreesDir, taskId);
+    const root = path.resolve(this.opts.runWorktreesDir);
+    if (!candidate.startsWith(root + path.sep) && candidate !== root) {
+      throw new GuardrailError(
+        `task_id "${taskId}" resolves outside runWorktreesDir`,
+        {
+          code: 'user_input',
+          provider: 'concurrent-dispatch',
+          details: { task_id: taskId, resolved: candidate, root },
+        },
+      );
+    }
+    return candidate;
   }
 
   /**
