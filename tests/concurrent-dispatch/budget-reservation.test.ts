@@ -1,17 +1,20 @@
 // tests/concurrent-dispatch/budget-reservation.test.ts
 //
 // Tests for the budget reservation ledger (PR 3/6, v7.11.0). Covers issue
-// #190 acceptance bullets:
+// #190 acceptance bullets PLUS Codex pass-1 findings:
 //
-//   * `reserve()` is atomic: two concurrent callers cannot both pass the
-//     budget check
-//   * `task.budget_increased_reservation` re-checks `perRunUSD` and halts
-//     on overage
-//   * `perSubagentUSD` enforced as HARD cap: dispatch rejected if
-//     `preFlightEstimate > perSubagentUSD`
-//   * Resume replay: `reserved_total = sum(reserved +
-//     increased_reservation) - sum(released)` reconstructs state from
-//     events.ndjson alone
+//   CRITICAL 1: replay events.ndjson under the writer lock — proved via
+//     two-instance test (each instance holds its own SerializedWriter
+//     pointed at the same events.ndjson; second observes first's
+//     reservation before its check).
+//   CRITICAL 2: corrected accounting model — committedTotal = spentTotal
+//     + activeReservedTotal. Releases preserve commitment, not free it.
+//   WARN 3: absolute (not delta) semantics for `increaseReservation`.
+//   WARN 4: `task.budget_halt` lands atomically under the same lock
+//     BEFORE `BudgetExceededError` is thrown.
+//   WARN 5: cross-instance reservation visibility.
+//   WARN 6: integer-micro internal arithmetic survives float boundary
+//     cases like `$0.1 + $0.2`.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -76,8 +79,9 @@ describe('BudgetReservation.reserve', () => {
     try {
       await ledger.reserve('t1', { preFlightEstimateUsd: 1.5, caps: DEFAULT_CAPS });
       const snap = ledger.snapshot();
-      assert.equal(snap.reservedTotal, 1.5);
-      assert.equal(snap.releasedTotal, 0);
+      assert.equal(snap.activeReservedTotal, 1.5);
+      assert.equal(snap.spentTotal, 0);
+      assert.equal(snap.committedTotal, 1.5);
       assert.equal(snap.perTask.get('t1')?.reserved_usd, 1.5);
 
       const events = readEventLines(eventsPath);
@@ -111,7 +115,7 @@ describe('BudgetReservation.reserve', () => {
       const events = readEventLines(eventsPath);
       assert.equal(events.length, 0);
       // Snapshot unchanged.
-      assert.equal(ledger.snapshot().reservedTotal, 0);
+      assert.equal(ledger.snapshot().committedTotal, 0);
     } finally {
       await cleanup();
     }
@@ -120,7 +124,7 @@ describe('BudgetReservation.reserve', () => {
   it('emits task.budget_halt when perRunUSD would be exceeded', async () => {
     const { eventsPath, ledger, cleanup } = await newSetup();
     try {
-      // Use the full budget on t1.
+      // Use the full budget on t1/t2/t3.
       await ledger.reserve('t1', { preFlightEstimateUsd: 3, caps: DEFAULT_CAPS });
       await ledger.reserve('t2', { preFlightEstimateUsd: 3, caps: DEFAULT_CAPS });
       await ledger.reserve('t3', { preFlightEstimateUsd: 3, caps: DEFAULT_CAPS });
@@ -137,6 +141,36 @@ describe('BudgetReservation.reserve', () => {
         (events[3]! as Extract<RunEvent, { event: 'task.budget_halt' }>).task_id,
         't4',
       );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('budget_halt event is durably committed BEFORE the throw (WARN #4)', async () => {
+    // Codex pass 1 WARN #4: halt event must land under the same lock as
+    // the rejected reserve, atomically. Prove by inspecting the file
+    // immediately after the throw — it should already contain the halt
+    // line even though the caller saw a rejection.
+    const { eventsPath, ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 1, perSubagentUSD: 1 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps });
+      let threw = false;
+      try {
+        await ledger.reserve('t2', { preFlightEstimateUsd: 1, caps });
+      } catch (err) {
+        threw = true;
+        assert.ok(err instanceof BudgetExceededError);
+        // Read disk INSIDE the catch — the halt must already be there.
+        const events = readEventLines(eventsPath);
+        assert.equal(events.length, 2);
+        assert.equal(events[1]!.event, 'task.budget_halt');
+        assert.equal(
+          (events[1]! as Extract<RunEvent, { event: 'task.budget_halt' }>).task_id,
+          't2',
+        );
+      }
+      assert.equal(threw, true, 'expected reserve to reject');
     } finally {
       await cleanup();
     }
@@ -184,7 +218,8 @@ describe('BudgetReservation.reserve', () => {
       assert.equal(successes, 3, 'exactly 3 reservations should fit');
       assert.equal(failures, 2);
       // Snapshot: 3 * $1.50 = $4.50
-      assert.equal(ledger.snapshot().reservedTotal, 4.5);
+      assert.equal(ledger.snapshot().activeReservedTotal, 4.5);
+      assert.equal(ledger.snapshot().committedTotal, 4.5);
       // Events: 3 reserved + 2 halt = 5
       const events = readEventLines(eventsPath);
       assert.equal(events.length, 5);
@@ -219,6 +254,61 @@ describe('BudgetReservation.reserve', () => {
       await cleanup();
     }
   });
+
+  it('release does NOT free committed budget — preserves spent vs reserved (CRITICAL #2)', async () => {
+    // Codex pass 1 CRITICAL #2: the naive `in_flight = reserved -
+    // released_actual` model lets a $6 reservation released at $6 actual
+    // free $6 under a $10 cap → another $6 reservation slips in → $12
+    // committed. The fix preserves commitment via committedTotal =
+    // spentTotal + activeReservedTotal.
+    const { ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 10, perSubagentUSD: 6 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 6, caps });
+      await ledger.release('t1', { actualCostUsd: 6 });
+      // After release: spent=$6, active=$0, committed=$6. Headroom=$4.
+      const snap = ledger.snapshot();
+      assert.equal(snap.spentTotal, 6);
+      assert.equal(snap.activeReservedTotal, 0);
+      assert.equal(snap.committedTotal, 6);
+      // A new $6 reservation MUST halt — committed would be $12 > $10.
+      await assert.rejects(
+        ledger.reserve('t2', { preFlightEstimateUsd: 6, caps }),
+        (err: Error) => err instanceof BudgetExceededError,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('float-precision boundary: $0.1 + $0.2 reserves exactly $0.30 (WARN #6)', async () => {
+    // Internal arithmetic uses integer micros so 0.1 + 0.2 sums to 0.3,
+    // not 0.30000000000000004. This guards the cap check from
+    // floating-point drift.
+    const { eventsPath, ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 0.3, perSubagentUSD: 0.2 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 0.1, caps });
+      await ledger.reserve('t2', { preFlightEstimateUsd: 0.2, caps });
+      const snap = ledger.snapshot();
+      // committedTotal should be EXACTLY 0.3 once routed through micros.
+      assert.equal(snap.committedTotal, 0.3);
+      // A third $0.000001 reservation must halt (perRunUSD is fully
+      // committed). Without integer-micro precision the sum could appear
+      // as 0.30000000000000004 and either let this slip through or
+      // (worse) halt earlier reservations.
+      await assert.rejects(
+        ledger.reserve('t3', { preFlightEstimateUsd: 0.000001, caps }),
+        (err: Error) => err instanceof BudgetExceededError,
+      );
+      const events = readEventLines(eventsPath);
+      // 2 reserved + 1 halt.
+      assert.equal(events.length, 3);
+      assert.equal(events[2]!.event, 'task.budget_halt');
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe('BudgetReservation.increaseReservation', () => {
@@ -232,11 +322,38 @@ describe('BudgetReservation.increaseReservation', () => {
         caps: DEFAULT_CAPS,
       });
       const snap = ledger.snapshot();
-      assert.equal(snap.reservedTotal, 2);
+      assert.equal(snap.activeReservedTotal, 2);
+      assert.equal(snap.committedTotal, 2);
       assert.equal(snap.perTask.get('t1')?.reserved_usd, 2);
       const events = readEventLines(eventsPath);
       assert.equal(events.length, 2);
       assert.equal(events[1]!.event, 'task.budget_increased_reservation');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('treats newReservedUsd as ABSOLUTE, not delta (WARN #3)', async () => {
+    // Reserve $2 → increase to $3 → increase to $5. Final commitment
+    // must be $5 (the latest absolute value), NOT $2 + $3 + $5 = $10
+    // (the delta misreading).
+    const { ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 10, perSubagentUSD: 5 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 2, caps });
+      await ledger.increaseReservation('t1', {
+        newReservedUsd: 3,
+        reason: 'first bump',
+        caps,
+      });
+      assert.equal(ledger.snapshot().committedTotal, 3);
+      await ledger.increaseReservation('t1', {
+        newReservedUsd: 5,
+        reason: 'second bump',
+        caps,
+      });
+      assert.equal(ledger.snapshot().committedTotal, 5);
+      assert.equal(ledger.snapshot().perTask.get('t1')?.reserved_usd, 5);
     } finally {
       await cleanup();
     }
@@ -248,13 +365,13 @@ describe('BudgetReservation.increaseReservation', () => {
       const caps: BudgetCaps = { perRunUSD: 5, perSubagentUSD: 3 };
       await ledger.reserve('t1', { preFlightEstimateUsd: 2, caps });
       await ledger.reserve('t2', { preFlightEstimateUsd: 2, caps });
-      // Bumping t1 from 2 to 3 means in_flight goes from 4 to 5; that fits.
+      // Bumping t1 from 2 to 3 means active goes from 4 to 5; that fits.
       await ledger.increaseReservation('t1', {
         newReservedUsd: 3,
         reason: 'edge',
         caps,
       });
-      // Bumping t2 from 2 to 3 would put in_flight at 6 — over the $5 cap.
+      // Bumping t2 from 2 to 3 would put active at 6 — over the $5 cap.
       await assert.rejects(
         ledger.increaseReservation('t2', {
           newReservedUsd: 3,
@@ -348,8 +465,10 @@ describe('BudgetReservation.release', () => {
       await ledger.reserve('t1', { preFlightEstimateUsd: 2, caps: DEFAULT_CAPS });
       await ledger.release('t1', { actualCostUsd: 1.25 });
       const snap = ledger.snapshot();
-      assert.equal(snap.reservedTotal, 2);
-      assert.equal(snap.releasedTotal, 1.25);
+      // After release: spent=$1.25, active=$0, committed=$1.25.
+      assert.equal(snap.spentTotal, 1.25);
+      assert.equal(snap.activeReservedTotal, 0);
+      assert.equal(snap.committedTotal, 1.25);
       const events = readEventLines(eventsPath);
       assert.equal(events.length, 2);
       const rel = events[1]! as Extract<RunEvent, { event: 'task.budget_released' }>;
@@ -367,12 +486,9 @@ describe('BudgetReservation.release', () => {
       await ledger.release('t1', { actualCostUsd: 1.6 });
       const events = readEventLines(eventsPath);
       const rel = events[1]! as Extract<RunEvent, { event: 'task.budget_released' }>;
-      // floating-point comparison — released $1 reservation against $1.6 actual,
-      // delta = 1 - 1.6 = -0.6 ± float epsilon.
-      assert.ok(
-        Math.abs(rel.delta_vs_reservation_usd - -0.6) < 1e-9,
-        `expected ~-0.6, got ${rel.delta_vs_reservation_usd}`,
-      );
+      // Integer-micro arithmetic gives an exact -0.6, no float epsilon
+      // tolerance needed.
+      assert.equal(rel.delta_vs_reservation_usd, -0.6);
     } finally {
       await cleanup();
     }
@@ -410,8 +526,107 @@ describe('BudgetReservation.release', () => {
   });
 });
 
+describe('BudgetReservation cross-instance (CRITICAL #1 + WARN #5)', () => {
+  it('second instance sees first instance reservation via on-disk replay', async () => {
+    // Two BudgetReservation instances backed by independent
+    // SerializedWriters pointed at the same events.ndjson. After
+    // instance A reserves, instance B's snapshot is stale (cache only
+    // updates on its own mutations) — but the next mutation on B
+    // re-replays disk under the lock and observes A's reservation.
+    const { eventsPath } = tmpRun();
+    const writerA = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: testWriterId,
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 1000,
+    });
+    const writerB = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: { ...testWriterId, pid: testWriterId.pid + 1 },
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 1000,
+    });
+    try {
+      const caps: BudgetCaps = { perRunUSD: 5, perSubagentUSD: 3 };
+      const ledgerA = new BudgetReservation(writerA);
+      const ledgerB = new BudgetReservation(writerB);
+
+      // A reserves $3.
+      await ledgerA.reserve('tA', { preFlightEstimateUsd: 3, caps });
+
+      // B then tries to reserve $3 — only $2 remaining. The disk-replay
+      // inside the lock MUST see A's appended reservation and halt.
+      await assert.rejects(
+        ledgerB.reserve('tB', { preFlightEstimateUsd: 3, caps }),
+        (err: Error) => err instanceof BudgetExceededError,
+      );
+
+      // The halt landed on disk.
+      const events = readEventLines(eventsPath);
+      assert.equal(events.length, 2);
+      assert.equal(events[0]!.event, 'task.budget_reserved');
+      assert.equal(events[1]!.event, 'task.budget_halt');
+
+      // After the failed reserve, ledgerB's cache was refreshed from
+      // disk inside the lock — its snapshot should now reflect A's
+      // reservation.
+      const snapB = ledgerB.snapshot();
+      assert.equal(snapB.activeReservedTotal, 3);
+      assert.equal(snapB.committedTotal, 3);
+      assert.ok(snapB.perTask.has('tA'));
+    } finally {
+      await writerA.close();
+      await writerB.close();
+    }
+  });
+
+  it('races between two instances produce a consistent committed total', async () => {
+    const { eventsPath } = tmpRun();
+    const writerA = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: testWriterId,
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 1000,
+    });
+    const writerB = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: { ...testWriterId, pid: testWriterId.pid + 2 },
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 1000,
+    });
+    try {
+      const caps: BudgetCaps = { perRunUSD: 5, perSubagentUSD: 2 };
+      const ledgerA = new BudgetReservation(writerA);
+      const ledgerB = new BudgetReservation(writerB);
+
+      // 10 concurrent reservations of $1, split across the two
+      // instances. perRun=$5 → exactly 5 should succeed.
+      const tasks: Promise<void>[] = [];
+      for (let i = 0; i < 10; i++) {
+        const ledger = i % 2 === 0 ? ledgerA : ledgerB;
+        const taskId = `t${i}`;
+        tasks.push(
+          ledger.reserve(taskId, { preFlightEstimateUsd: 1, caps }).catch(() => {}),
+        );
+      }
+      await Promise.all(tasks);
+
+      // Read events from disk — must show exactly 5 reservations + 5
+      // halts and never exceed perRunUSD.
+      const events = readEventLines(eventsPath);
+      const reserved = events.filter(e => e.event === 'task.budget_reserved').length;
+      const halted = events.filter(e => e.event === 'task.budget_halt').length;
+      assert.equal(reserved, 5, 'exactly 5 reservations fit under $5 cap');
+      assert.equal(halted, 5);
+    } finally {
+      await writerA.close();
+      await writerB.close();
+    }
+  });
+});
+
 describe('BudgetReservation.replayFromEvents (resume)', () => {
-  it('reconstructs reservedTotal and releasedTotal from events.ndjson alone', async () => {
+  it('reconstructs totals from events.ndjson alone', async () => {
     const { eventsPath, ledger, cleanup } = await newSetup();
     try {
       const caps: BudgetCaps = { perRunUSD: 20, perSubagentUSD: 5 };
@@ -427,10 +642,12 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
 
       // Fresh replay from disk.
       const summary = BudgetReservation.replayFromEvents(eventsPath);
-      // reserved_total = 2 (initial t1) + 3 (initial t2) + 2 (bump t1) = 7
-      assert.equal(summary.reservedTotal, 7);
-      // released_total = 2.5 (t2)
-      assert.equal(summary.releasedTotal, 2.5);
+      // spentTotal = $2.5 (t2 released at $2.50).
+      assert.equal(summary.spentTotal, 2.5);
+      // activeReservedTotal = $4 (t1 latest reservation, t2 released).
+      assert.equal(summary.activeReservedTotal, 4);
+      // committedTotal = spent + active = $6.5.
+      assert.equal(summary.committedTotal, 6.5);
       // Per-task state.
       assert.equal(summary.perTask.get('t1')?.reserved_usd, 4);
       assert.equal(summary.perTask.get('t1')?.released, false);
@@ -465,10 +682,12 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
     const ledger2 = new BudgetReservation(writer2);
     await ledger2.hydrateFromEvents(setup1.eventsPath);
     const snap = ledger2.snapshot();
-    // reserved_total = 5 (alpha) + 7 (beta initial) + 2 (beta bump) = 14
-    assert.equal(snap.reservedTotal, 14);
-    // released_total = 4
-    assert.equal(snap.releasedTotal, 4);
+    // spentTotal = $4 (alpha released at $4).
+    assert.equal(snap.spentTotal, 4);
+    // activeReservedTotal = $9 (beta bumped to $9; alpha released).
+    assert.equal(snap.activeReservedTotal, 9);
+    // committedTotal = $13.
+    assert.equal(snap.committedTotal, 13);
     assert.equal(snap.perTask.get('alpha')?.released, true);
     assert.equal(snap.perTask.get('beta')?.reserved_usd, 9);
     await writer2.close();
@@ -476,14 +695,15 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
 
   it('returns empty summary on missing or empty events.ndjson', () => {
     const empty = BudgetReservation.replayFromEvents('/nonexistent/path');
-    assert.equal(empty.reservedTotal, 0);
-    assert.equal(empty.releasedTotal, 0);
+    assert.equal(empty.spentTotal, 0);
+    assert.equal(empty.activeReservedTotal, 0);
+    assert.equal(empty.committedTotal, 0);
     assert.equal(empty.perTask.size, 0);
 
     const { eventsPath } = tmpRun();
     fs.writeFileSync(eventsPath, '');
     const e2 = BudgetReservation.replayFromEvents(eventsPath);
-    assert.equal(e2.reservedTotal, 0);
+    assert.equal(e2.committedTotal, 0);
     assert.equal(e2.perTask.size, 0);
   });
 
@@ -505,8 +725,9 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
     await setup.cleanup();
 
     const summary = BudgetReservation.replayFromEvents(setup.eventsPath);
-    assert.equal(summary.reservedTotal, 1);
-    assert.equal(summary.releasedTotal, 0);
+    assert.equal(summary.spentTotal, 0);
+    assert.equal(summary.activeReservedTotal, 1);
+    assert.equal(summary.committedTotal, 1);
   });
 
   it('tolerates truncated-tail by stopping at the last valid line', async () => {
@@ -519,7 +740,7 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
     fs.appendFileSync(setup.eventsPath, '{"event":"task.budget_reser');
     // Replay should still recover t1 + t2.
     const summary = BudgetReservation.replayFromEvents(setup.eventsPath);
-    assert.equal(summary.reservedTotal, 2);
+    assert.equal(summary.committedTotal, 2);
     assert.equal(summary.perTask.size, 2);
   });
 });
