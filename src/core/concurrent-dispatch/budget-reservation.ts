@@ -104,11 +104,22 @@ function microsToUsd(micros: number): number {
   return micros / MICROS_PER_USD;
 }
 
-/** Reject NaN, Infinity, and negative USD inputs at the public API boundary
- *  before they reach the micros conversion. Codex pass 2 CRITICAL #2 —
- *  `NaN > anything` is false so a NaN preFlightEstimate would slip past the
- *  hard cap, and `usdToMicros(NaN)` returns NaN which then corrupts every
- *  subsequent comparison. */
+/** Max USD value we will accept at the public API. Above this, the
+ *  integer-micros representation could exceed `Number.MAX_SAFE_INTEGER`
+ *  and arithmetic would lose precision — making cap comparisons
+ *  unreliable. `MAX_SAFE_INTEGER / MICROS_PER_USD ≈ $9.007e9` which is
+ *  more than any plausible per-run budget for a CLI tool. */
+const MAX_USD = Number.MAX_SAFE_INTEGER / MICROS_PER_USD;
+
+/** Reject NaN, Infinity, negative, and out-of-safe-range USD inputs at the
+ *  public API boundary before they reach the micros conversion.
+ *
+ *  Codex pass 2 CRITICAL #2 — `NaN > anything` is false so a NaN
+ *  preFlightEstimate would slip past the hard cap, and `usdToMicros(NaN)`
+ *  returns NaN which then corrupts every subsequent comparison.
+ *
+ *  Codex pass 3 WARN — values above MAX_USD would lose precision once
+ *  converted to micros and aggregated, breaking exact cap comparisons. */
 function assertNonNegativeFiniteUsd(label: string, value: number): void {
   if (!Number.isFinite(value) || value < 0) {
     throw new GuardrailError(
@@ -117,6 +128,16 @@ function assertNonNegativeFiniteUsd(label: string, value: number): void {
         code: 'user_input',
         provider: 'concurrent-dispatch',
         details: { label, value },
+      },
+    );
+  }
+  if (value > MAX_USD) {
+    throw new GuardrailError(
+      `${label}: must be <= $${MAX_USD} (got ${String(value)}) — exceeds safe-integer micros range`,
+      {
+        code: 'user_input',
+        provider: 'concurrent-dispatch',
+        details: { label, value, maxUsd: MAX_USD },
       },
     );
   }
@@ -516,16 +537,14 @@ export class BudgetReservation {
       const disk = BudgetReservation.replayFromEventsMicros(eventsNdjsonPath);
       this.applyReplayMicros(disk);
 
-      if (disk.haltedTaskIds.has(taskId)) {
-        throw new GuardrailError(
-          `task.${taskId}: cannot release; task is terminally halted`,
-          {
-            code: 'adapter_bug',
-            provider: 'concurrent-dispatch',
-            details: { task_id: taskId, terminal_state: 'budget_halt' },
-          },
-        );
-      }
+      // NOTE: release() is INTENTIONALLY allowed after task.budget_halt.
+      // Codex pass 3 CRITICAL #2: if increaseReservation triggered the
+      // halt, the task still has an active reservation that must be
+      // finalized (or it permanently strands activeReservedMicros for
+      // the run). The terminal-halt guard applies only to operations
+      // that would create NEW state for the task (reserve,
+      // increaseReservation). release records actual spend and clears
+      // the active reservation — it is the legitimate finalizer.
 
       const prior = this.reservations.get(taskId);
       if (!prior) {
@@ -652,6 +671,22 @@ export class BudgetReservation {
 
       switch (ev.event) {
         case 'task.budget_reserved': {
+          // Codex pass 3 CRITICAL #1: halt is terminal — reserving a
+          // halted task_id post-halt is a corruption signal.
+          if (haltedTaskIds.has(ev.task_id)) {
+            throw new GuardrailError(
+              `replay: task.${ev.task_id} has task.budget_reserved AFTER task.budget_halt (corrupt ledger)`,
+              {
+                code: 'adapter_bug',
+                provider: 'concurrent-dispatch',
+                details: {
+                  task_id: ev.task_id,
+                  event: 'task.budget_reserved',
+                  terminal_state: 'budget_halt',
+                },
+              },
+            );
+          }
           const entry: ReservationEntry = {
             task_id: ev.task_id,
             reserved_usd: ev.reserved_usd,
@@ -662,6 +697,20 @@ export class BudgetReservation {
           break;
         }
         case 'task.budget_increased_reservation': {
+          if (haltedTaskIds.has(ev.task_id)) {
+            throw new GuardrailError(
+              `replay: task.${ev.task_id} has task.budget_increased_reservation AFTER task.budget_halt (corrupt ledger)`,
+              {
+                code: 'adapter_bug',
+                provider: 'concurrent-dispatch',
+                details: {
+                  task_id: ev.task_id,
+                  event: 'task.budget_increased_reservation',
+                  terminal_state: 'budget_halt',
+                },
+              },
+            );
+          }
           const entry = perTask.get(ev.task_id);
           if (!entry) {
             // Log gap — the reserved event is missing. Treat the

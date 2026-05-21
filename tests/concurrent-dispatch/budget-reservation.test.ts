@@ -245,6 +245,25 @@ describe('BudgetReservation.reserve', () => {
     }
   });
 
+  it('rejects USD values above the safe-integer micros range (Codex pass 3 WARN)', async () => {
+    const { ledger, cleanup } = await newSetup();
+    try {
+      // MAX_USD ≈ $9.007e9. Anything above must reject; aggregate micros
+      // could otherwise blow past Number.MAX_SAFE_INTEGER and break cap
+      // comparisons.
+      const tooBig = 1e10;
+      await assert.rejects(
+        ledger.reserve('t1', {
+          preFlightEstimateUsd: tooBig,
+          caps: { perRunUSD: 1e11, perSubagentUSD: 1e11 },
+        }),
+        /safe-integer micros range/,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('halt is terminal — refuses further reserve on same task_id (Codex pass 2 CRITICAL #1)', async () => {
     const { eventsPath, ledger, cleanup } = await newSetup();
     try {
@@ -498,6 +517,98 @@ describe('BudgetReservation.increaseReservation', () => {
         }),
         /must raise the cap/,
       );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects NaN / Infinity / negative inputs to increaseReservation (Codex pass 3 WARN)', async () => {
+    const { ledger, cleanup } = await newSetup();
+    try {
+      await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps: DEFAULT_CAPS });
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: Number.NaN,
+          reason: 'r',
+          caps: DEFAULT_CAPS,
+        }),
+        /finite non-negative/,
+      );
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: Number.POSITIVE_INFINITY,
+          reason: 'r',
+          caps: DEFAULT_CAPS,
+        }),
+        /finite non-negative/,
+      );
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: -1,
+          reason: 'r',
+          caps: DEFAULT_CAPS,
+        }),
+        /finite non-negative/,
+      );
+      // NaN in caps also rejects.
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: 2,
+          reason: 'r',
+          caps: { perRunUSD: Number.NaN, perSubagentUSD: 5 },
+        }),
+        /finite non-negative/,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('release is allowed after increaseReservation halt — finalizes stranded reservation (Codex pass 3 CRITICAL #2)', async () => {
+    // If increaseReservation triggers a halt, the task already has an
+    // active reservation. release() MUST still be allowed so the
+    // finalizer can clear activeReservedMicros — otherwise the run
+    // permanently strands the reservation and blocks other tasks.
+    const { eventsPath, ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 3, perSubagentUSD: 3 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 2, caps });
+      // Bump from $2 → $3.5 — exceeds perSubagentUSD ($3), pre-lock
+      // throw, no halt. Use a different setup: bump that exceeds
+      // perRunUSD instead.
+      await ledger.reserve('t2', { preFlightEstimateUsd: 1, caps });
+      // Now committed = $3 (cap). Bump t1 from $2 → $3 should halt (it
+      // would push committed to $4 > $3).
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: 3,
+          reason: 'over',
+          caps,
+        }),
+        (err: Error) => err instanceof BudgetExceededError,
+      );
+      // t1 is now halted but still has an active $2 reservation. The
+      // release MUST succeed and clear that active reservation.
+      await ledger.release('t1', { actualCostUsd: 2 });
+      const snap = ledger.snapshot();
+      assert.equal(snap.spentTotal, 2, 't1 spent recorded');
+      // Active = t2's still-active $1.
+      assert.equal(snap.activeReservedTotal, 1);
+      assert.equal(snap.committedTotal, 3);
+      // And future reserve/increase on t1 still rejects (terminal).
+      await assert.rejects(
+        ledger.increaseReservation('t1', {
+          newReservedUsd: 3,
+          reason: 'after-release',
+          caps,
+        }),
+        /no in-flight reservation|terminally halted/,
+      );
+      const events = readEventLines(eventsPath);
+      // 2 reserved + 1 halt + 1 released
+      assert.equal(events.filter(e => e.event === 'task.budget_reserved').length, 2);
+      assert.equal(events.filter(e => e.event === 'task.budget_halt').length, 1);
+      assert.equal(events.filter(e => e.event === 'task.budget_released').length, 1);
     } finally {
       await cleanup();
     }
@@ -813,6 +924,129 @@ describe('BudgetReservation.replayFromEvents (resume)', () => {
     assert.equal(summary.spentTotal, 0);
     assert.equal(summary.activeReservedTotal, 1);
     assert.equal(summary.committedTotal, 1);
+  });
+
+  it('throws on corrupt ledger: task.budget_reserved after task.budget_halt (Codex pass 3 CRITICAL #1)', async () => {
+    // Hand-write an events.ndjson with halt followed by a later
+    // reserved event for the same task. Replay MUST fail closed
+    // rather than silently apply the post-halt mutation.
+    const { eventsPath } = tmpRun();
+    const halt = JSON.stringify({
+      schema_version: 1,
+      seq: 1,
+      ts: '2026-05-20T00:00:00.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_halt',
+      task_id: 't1',
+      budget_remaining_usd: 0,
+      preflight_estimate_usd: 1,
+    });
+    const reserved = JSON.stringify({
+      schema_version: 1,
+      seq: 2,
+      ts: '2026-05-20T00:00:01.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_reserved',
+      task_id: 't1',
+      reserved_usd: 1,
+      run_budget_remaining_after_reservation_usd: 0,
+    });
+    fs.writeFileSync(eventsPath, `${halt}\n${reserved}\n`);
+    assert.throws(
+      () => BudgetReservation.replayFromEvents(eventsPath),
+      /AFTER task\.budget_halt/,
+    );
+  });
+
+  it('throws on corrupt ledger: task.budget_increased_reservation after halt', async () => {
+    const { eventsPath } = tmpRun();
+    const reserved = JSON.stringify({
+      schema_version: 1,
+      seq: 1,
+      ts: '2026-05-20T00:00:00.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_reserved',
+      task_id: 't1',
+      reserved_usd: 1,
+      run_budget_remaining_after_reservation_usd: 0,
+    });
+    const halt = JSON.stringify({
+      schema_version: 1,
+      seq: 2,
+      ts: '2026-05-20T00:00:01.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_halt',
+      task_id: 't1',
+      budget_remaining_usd: 0,
+      preflight_estimate_usd: 1,
+    });
+    const increased = JSON.stringify({
+      schema_version: 1,
+      seq: 3,
+      ts: '2026-05-20T00:00:02.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_increased_reservation',
+      task_id: 't1',
+      prior_reserved_usd: 1,
+      new_reserved_usd: 2,
+      reason: 'bug',
+    });
+    fs.writeFileSync(eventsPath, `${reserved}\n${halt}\n${increased}\n`);
+    assert.throws(
+      () => BudgetReservation.replayFromEvents(eventsPath),
+      /AFTER task\.budget_halt/,
+    );
+  });
+
+  it('replay ALLOWS task.budget_released after halt (legit finalizer path)', async () => {
+    // The pass-3 CRITICAL fix: halt does NOT block release at runtime
+    // (otherwise active reservations strand). Replay must therefore
+    // also allow the released event to land after halt for the same
+    // task — that's the legitimate finalizer pattern.
+    const { eventsPath } = tmpRun();
+    const reserved = JSON.stringify({
+      schema_version: 1,
+      seq: 1,
+      ts: '2026-05-20T00:00:00.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_reserved',
+      task_id: 't1',
+      reserved_usd: 2,
+      run_budget_remaining_after_reservation_usd: 1,
+    });
+    const halt = JSON.stringify({
+      schema_version: 1,
+      seq: 2,
+      ts: '2026-05-20T00:00:01.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_halt',
+      task_id: 't1',
+      budget_remaining_usd: 1,
+      preflight_estimate_usd: 2,
+    });
+    const released = JSON.stringify({
+      schema_version: 1,
+      seq: 3,
+      ts: '2026-05-20T00:00:02.000Z',
+      runId: 'r1',
+      writerId: testWriterId,
+      event: 'task.budget_released',
+      task_id: 't1',
+      actual_cost_usd: 2,
+      delta_vs_reservation_usd: 0,
+    });
+    fs.writeFileSync(eventsPath, `${reserved}\n${halt}\n${released}\n`);
+    const summary = BudgetReservation.replayFromEvents(eventsPath);
+    assert.equal(summary.spentTotal, 2);
+    assert.equal(summary.activeReservedTotal, 0);
+    assert.equal(summary.perTask.get('t1')?.released, true);
   });
 
   it('tolerates truncated-tail by stopping at the last valid line', async () => {
