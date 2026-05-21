@@ -89,14 +89,37 @@ import { SerializedWriter } from '../run-state/serialized-writer.ts';
 import type { RunEvent } from '../run-state/types.ts';
 
 // ---- Micros conversion helpers -------------------------------------------
-// 1 USD = 1_000_000 micros. Round half-to-even at the boundary so $0.1 +
-// $0.2 → 100000 + 200000 = 300000 micros = $0.30 (NOT $0.30000000000000004).
+// 1 USD = 1_000_000 micros. `Math.round` uses round-half-away-from-zero (NOT
+// banker's rounding); for budget enforcement at the boundary where every
+// reservation is a fresh value, the rounding mode is symmetric and inputs
+// rarely land exactly on a half-micro, so the simpler primitive is fine.
+// (Inputs are also `Number.isFinite` and `>= 0` validated upstream — see
+// `assertNonNegativeFiniteUsd`.) Range: `Number.MAX_SAFE_INTEGER /
+// 1_000_000 ≈ $9.007e9` — more than any plausible per-run cap.
 const MICROS_PER_USD = 1_000_000;
 function usdToMicros(usd: number): number {
   return Math.round(usd * MICROS_PER_USD);
 }
 function microsToUsd(micros: number): number {
   return micros / MICROS_PER_USD;
+}
+
+/** Reject NaN, Infinity, and negative USD inputs at the public API boundary
+ *  before they reach the micros conversion. Codex pass 2 CRITICAL #2 —
+ *  `NaN > anything` is false so a NaN preFlightEstimate would slip past the
+ *  hard cap, and `usdToMicros(NaN)` returns NaN which then corrupts every
+ *  subsequent comparison. */
+function assertNonNegativeFiniteUsd(label: string, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new GuardrailError(
+      `${label}: must be a finite non-negative number (got ${String(value)})`,
+      {
+        code: 'user_input',
+        provider: 'concurrent-dispatch',
+        details: { label, value },
+      },
+    );
+  }
 }
 
 /** Budget caps for a single run. `perRunUSD` is the hard ceiling on total
@@ -235,6 +258,17 @@ export class BudgetReservation {
    * halt on resume.
    */
   async reserve(taskId: string, opts: ReserveOptions): Promise<void> {
+    // Input validation (Codex pass 2 CRITICAL #2). Reject NaN/Infinity/
+    // negative BEFORE the hard-cap check — `NaN > x` is false in JS so a
+    // NaN estimate would otherwise sail past the cap and corrupt every
+    // downstream comparison.
+    assertNonNegativeFiniteUsd(
+      `task.${taskId}: preFlightEstimateUsd`,
+      opts.preFlightEstimateUsd,
+    );
+    assertNonNegativeFiniteUsd('caps.perRunUSD', opts.caps.perRunUSD);
+    assertNonNegativeFiniteUsd('caps.perSubagentUSD', opts.caps.perSubagentUSD);
+
     if (opts.preFlightEstimateUsd > opts.caps.perSubagentUSD) {
       throw new BudgetExceededError(
         `task.${taskId}: pre-flight estimate $${opts.preFlightEstimateUsd.toFixed(2)} exceeds perSubagentUSD cap of $${opts.caps.perSubagentUSD.toFixed(2)}`,
@@ -243,16 +277,6 @@ export class BudgetReservation {
           preFlightEstimateUsd: opts.preFlightEstimateUsd,
           perSubagentUSD: opts.caps.perSubagentUSD,
           violation: 'per_subagent_hard_cap',
-        },
-      );
-    }
-    if (opts.preFlightEstimateUsd < 0) {
-      throw new GuardrailError(
-        `task.${taskId}: pre-flight estimate must be >= 0 (got ${opts.preFlightEstimateUsd})`,
-        {
-          code: 'user_input',
-          provider: 'concurrent-dispatch',
-          details: { task_id: taskId, preFlightEstimateUsd: opts.preFlightEstimateUsd },
         },
       );
     }
@@ -268,14 +292,35 @@ export class BudgetReservation {
       const disk = BudgetReservation.replayFromEventsMicros(eventsNdjsonPath);
       this.applyReplayMicros(disk);
 
-      const existing = this.reservations.get(taskId);
-      if (existing && !existing.released) {
+      // Codex pass 2 CRITICAL #1: `task.budget_halt` is documented as the
+      // terminal record. Once it lands for a task, no later mutating
+      // event for that task is allowed. (Run-wide halt enforcement lives
+      // at the scheduler layer — this guard prevents the same-task
+      // resurrection class of bug.)
+      if (disk.haltedTaskIds.has(taskId)) {
         throw new GuardrailError(
-          `task.${taskId}: already has an in-flight reservation`,
+          `task.${taskId}: cannot reserve; task is terminally halted`,
           {
             code: 'adapter_bug',
             provider: 'concurrent-dispatch',
-            details: { task_id: taskId },
+            details: { task_id: taskId, terminal_state: 'budget_halt' },
+          },
+        );
+      }
+
+      // Codex pass 2 WARN #5: task_ids are immutable across their
+      // lifecycle. A released task cannot be re-reserved under the same
+      // id — caller must use a new id (or future attempt_id model).
+      const existing = this.reservations.get(taskId);
+      if (existing) {
+        throw new GuardrailError(
+          existing.released
+            ? `task.${taskId}: cannot re-reserve a released task_id; use a new id`
+            : `task.${taskId}: already has an in-flight reservation`,
+          {
+            code: 'adapter_bug',
+            provider: 'concurrent-dispatch',
+            details: { task_id: taskId, released: existing.released },
           },
         );
       }
@@ -338,6 +383,14 @@ export class BudgetReservation {
     taskId: string,
     opts: IncreaseReservationOptions,
   ): Promise<void> {
+    // Input validation (Codex pass 2 CRITICAL #2).
+    assertNonNegativeFiniteUsd(
+      `task.${taskId}: newReservedUsd`,
+      opts.newReservedUsd,
+    );
+    assertNonNegativeFiniteUsd('caps.perRunUSD', opts.caps.perRunUSD);
+    assertNonNegativeFiniteUsd('caps.perSubagentUSD', opts.caps.perSubagentUSD);
+
     // Pre-lock validation that doesn't depend on on-disk state.
     if (opts.newReservedUsd > opts.caps.perSubagentUSD) {
       throw new BudgetExceededError(
@@ -357,6 +410,17 @@ export class BudgetReservation {
     await this.writer.withExclusive(async ({ writeEvent, eventsNdjsonPath }) => {
       const disk = BudgetReservation.replayFromEventsMicros(eventsNdjsonPath);
       this.applyReplayMicros(disk);
+
+      if (disk.haltedTaskIds.has(taskId)) {
+        throw new GuardrailError(
+          `task.${taskId}: cannot increase reservation; task is terminally halted`,
+          {
+            code: 'adapter_bug',
+            provider: 'concurrent-dispatch',
+            details: { task_id: taskId, terminal_state: 'budget_halt' },
+          },
+        );
+      }
 
       const prior = this.reservations.get(taskId);
       if (!prior || prior.released) {
@@ -439,22 +503,29 @@ export class BudgetReservation {
    * if the increase itself fails. This `release` just records the truth.
    */
   async release(taskId: string, opts: ReleaseOptions): Promise<void> {
-    if (opts.actualCostUsd < 0) {
-      throw new GuardrailError(
-        `task.${taskId}: actual cost must be >= 0 (got ${opts.actualCostUsd})`,
-        {
-          code: 'user_input',
-          provider: 'concurrent-dispatch',
-          details: { task_id: taskId, actualCostUsd: opts.actualCostUsd },
-        },
-      );
-    }
+    // Input validation (Codex pass 2 CRITICAL #2). Also catches NaN
+    // which would otherwise propagate through micros into spentTotal.
+    assertNonNegativeFiniteUsd(
+      `task.${taskId}: actualCostUsd`,
+      opts.actualCostUsd,
+    );
 
     const actualMicros = usdToMicros(opts.actualCostUsd);
 
     await this.writer.withExclusive(async ({ writeEvent, eventsNdjsonPath }) => {
       const disk = BudgetReservation.replayFromEventsMicros(eventsNdjsonPath);
       this.applyReplayMicros(disk);
+
+      if (disk.haltedTaskIds.has(taskId)) {
+        throw new GuardrailError(
+          `task.${taskId}: cannot release; task is terminally halted`,
+          {
+            code: 'adapter_bug',
+            provider: 'concurrent-dispatch',
+            details: { task_id: taskId, terminal_state: 'budget_halt' },
+          },
+        );
+      }
 
       const prior = this.reservations.get(taskId);
       if (!prior) {
@@ -545,15 +616,16 @@ export class BudgetReservation {
    */
   private static replayFromEventsMicros(eventsNdjsonPath: string): ReplaySummaryMicros {
     const perTask = new Map<string, ReservationEntry>();
+    const haltedTaskIds = new Set<string>();
     let spentMicros = 0;
     let activeReservedMicros = 0;
 
     if (!fs.existsSync(eventsNdjsonPath)) {
-      return { spentMicros, activeReservedMicros, perTask };
+      return { spentMicros, activeReservedMicros, perTask, haltedTaskIds };
     }
     const raw = fs.readFileSync(eventsNdjsonPath, 'utf8');
     if (!raw) {
-      return { spentMicros, activeReservedMicros, perTask };
+      return { spentMicros, activeReservedMicros, perTask, haltedTaskIds };
     }
 
     const endsWithNewline = raw.endsWith('\n');
@@ -637,19 +709,32 @@ export class BudgetReservation {
           spentMicros += usdToMicros(ev.actual_cost_usd);
           break;
         }
+        case 'task.budget_halt': {
+          // Halt is a terminal record for the task. Track so later
+          // mutating calls can refuse (Codex pass 2 CRITICAL #1). Note
+          // that halt does NOT free or change accounting totals — the
+          // task that triggered the halt may not have ever reserved
+          // (over-cap reserve writes halt without reserving).
+          haltedTaskIds.add(ev.task_id);
+          break;
+        }
         default:
           // Other event types don't affect budget ledger state.
           break;
       }
     }
 
-    return { spentMicros, activeReservedMicros, perTask };
+    return { spentMicros, activeReservedMicros, perTask, haltedTaskIds };
   }
 }
 
-/** Internal replay shape that preserves micro precision across the fold. */
+/** Internal replay shape that preserves micro precision across the fold.
+ *  `haltedTaskIds` is the set of task_ids that have a durable
+ *  `task.budget_halt` event on disk; mutating methods refuse to operate on
+ *  them (Codex pass 2 CRITICAL #1 — halt is terminal). */
 interface ReplaySummaryMicros {
   spentMicros: number;
   activeReservedMicros: number;
   perTask: Map<string, ReservationEntry>;
+  haltedTaskIds: Set<string>;
 }

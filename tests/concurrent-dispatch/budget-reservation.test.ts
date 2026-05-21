@@ -194,8 +194,80 @@ describe('BudgetReservation.reserve', () => {
     try {
       await assert.rejects(
         ledger.reserve('t1', { preFlightEstimateUsd: -0.5, caps: DEFAULT_CAPS }),
-        /must be >= 0/,
+        /finite non-negative/,
       );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects NaN / Infinity inputs (Codex pass 2 CRITICAL #2)', async () => {
+    const { ledger, cleanup } = await newSetup();
+    try {
+      // NaN slipping past the cap was the documented attack surface.
+      await assert.rejects(
+        ledger.reserve('t1', { preFlightEstimateUsd: Number.NaN, caps: DEFAULT_CAPS }),
+        /finite non-negative/,
+      );
+      await assert.rejects(
+        ledger.reserve('t2', {
+          preFlightEstimateUsd: Number.POSITIVE_INFINITY,
+          caps: DEFAULT_CAPS,
+        }),
+        /finite non-negative/,
+      );
+      // NaN in caps should also reject.
+      await assert.rejects(
+        ledger.reserve('t3', {
+          preFlightEstimateUsd: 1,
+          caps: { perRunUSD: Number.NaN, perSubagentUSD: 1 },
+        }),
+        /finite non-negative/,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects re-reserve of a released task_id (WARN #5)', async () => {
+    // task_ids are immutable across their lifecycle; once released,
+    // the same id cannot host a new reservation.
+    const { ledger, cleanup } = await newSetup();
+    try {
+      await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps: DEFAULT_CAPS });
+      await ledger.release('t1', { actualCostUsd: 1 });
+      await assert.rejects(
+        ledger.reserve('t1', { preFlightEstimateUsd: 1, caps: DEFAULT_CAPS }),
+        /cannot re-reserve/,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('halt is terminal — refuses further reserve on same task_id (Codex pass 2 CRITICAL #1)', async () => {
+    const { eventsPath, ledger, cleanup } = await newSetup();
+    try {
+      const caps: BudgetCaps = { perRunUSD: 1, perSubagentUSD: 1 };
+      await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps });
+      // t2 over-reserves → halt landed.
+      await assert.rejects(
+        ledger.reserve('t2', { preFlightEstimateUsd: 1, caps }),
+        (err: Error) => err instanceof BudgetExceededError,
+      );
+      // Even if we expand the cap, t2 cannot resurrect under the same id.
+      const expandedCaps: BudgetCaps = { perRunUSD: 100, perSubagentUSD: 1 };
+      await assert.rejects(
+        ledger.reserve('t2', { preFlightEstimateUsd: 1, caps: expandedCaps }),
+        /terminally halted/,
+      );
+      // Other tasks under the new cap still work.
+      await ledger.reserve('t3', { preFlightEstimateUsd: 1, caps: expandedCaps });
+      const events = readEventLines(eventsPath);
+      // t1 reserved, t2 halt, t3 reserved (t2's retry is rejected
+      // pre-write — terminal_state errors throw BEFORE writeEvent).
+      assert.equal(events.filter(e => e.event === 'task.budget_reserved').length, 2);
+      assert.equal(events.filter(e => e.event === 'task.budget_halt').length, 1);
     } finally {
       await cleanup();
     }
@@ -518,7 +590,20 @@ describe('BudgetReservation.release', () => {
       await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps: DEFAULT_CAPS });
       await assert.rejects(
         ledger.release('t1', { actualCostUsd: -0.5 }),
-        /actual cost must be >= 0/,
+        /finite non-negative/,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects NaN actual cost (Codex pass 2 CRITICAL #2)', async () => {
+    const { ledger, cleanup } = await newSetup();
+    try {
+      await ledger.reserve('t1', { preFlightEstimateUsd: 1, caps: DEFAULT_CAPS });
+      await assert.rejects(
+        ledger.release('t1', { actualCostUsd: Number.NaN }),
+        /finite non-negative/,
       );
     } finally {
       await cleanup();
