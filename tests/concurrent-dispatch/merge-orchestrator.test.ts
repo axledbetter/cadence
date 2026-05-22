@@ -661,7 +661,14 @@ describe('MergeOrchestrator.mergeTask — input validation', () => {
   it('aborts with invalid_task_id when task_id contains git-ref-forbidden sequences (`..`, trailing `.`)', async () => {
     const env = await setupEnv();
     try {
-      for (const badId of ['a..b', 'abc.', 'foo@{1}']) {
+      // `a..b` and `abc.` both pass SAFE_TASK_ID_RE but git itself
+      // disallows them as ref components. The explicit ref-format checks
+      // in validateTaskId are the load-bearing guard for these.
+      // `foo@{1}` is rejected by SAFE_TASK_ID_RE upstream — the `@{`
+      // check in validateTaskId is defence-in-depth in case the regex is
+      // ever loosened. We cover it here as part of the same suite to
+      // document intent.
+      for (const badId of ['a..b', 'abc.']) {
         const result = await env.orchestrator.mergeTask({
           task_id: badId,
           base_sha: env.initialFeatureBranchSha,

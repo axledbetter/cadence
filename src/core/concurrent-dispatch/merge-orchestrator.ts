@@ -1022,19 +1022,46 @@ function validateSha(value: unknown, fieldName: string): string | null {
   return null;
 }
 
+/** Regex matching Unicode bidi-override + zero-width-control characters
+ *  that JSON.stringify allows through verbatim. Built dynamically so the
+ *  source file itself stays free of invisible chars. */
+const BIDI_AND_ZWS_RE = new RegExp(
+  '[' +
+    '\\u200B-\\u200F' + // ZWSP, ZWNJ, ZWJ, LRM, RLM
+    '\\u202A-\\u202E' + // LRE, RLE, PDF, LRO, RLO
+    '\\u2066-\\u2069' + // LRI, RLI, FSI, PDI
+    ']',
+  'g',
+);
+
 /**
  * Render an untrusted value as a quoted string suitable for logs / event
- * payloads. Caps length to 200 chars and escapes control characters so
- * a maliciously-large or terminal-control-injected value cannot bloat
- * `events.ndjson` or corrupt terminal output. Codex pass 2 WARNING:
- * raw echo of untrusted input was a real diagnostic-bloat / log-injection
- * vector.
+ * payloads. Caps length to 200 chars and escapes:
+ *   - C0 / C1 control chars (via JSON.stringify's default escaping)
+ *   - Unicode bidi format chars (U+202A–U+202E, U+2066–U+2069) — these
+ *     visually reorder text in terminals and IDEs and can spoof log
+ *     output even though JSON.stringify lets them through verbatim
+ *   - Zero-width controls (U+200B–U+200F) — same rationale
+ *
+ * Codex pass 2 WARNING (raw echo as injection vector) + pass 3 WARNING
+ * (JSON.stringify alone misses bidi/format chars).
  */
 function quoteSafe(value: unknown): string {
   const raw = typeof value === 'string' ? value : String(value);
   const MAX = 200;
   const truncated = raw.length > MAX ? raw.slice(0, MAX) + `…(truncated, len=${raw.length})` : raw;
-  // Escape control + non-printable chars. JSON.stringify handles this
-  // cleanly and also adds the surrounding double-quotes.
-  return JSON.stringify(truncated);
+  // Replace bidi/format/zero-width controls with their \uXXXX escapes
+  // BEFORE JSON.stringify, so the final output literally shows the escape
+  // sequence rather than the invisible reorder character. Codepoints
+  // matched (covers bidi overrides + zero-width controls):
+  //   U+200B..U+200F  (ZWSP, ZWNJ, ZWJ, LRM, RLM)
+  //   U+202A..U+202E  (LRE, RLE, PDF, LRO, RLO)
+  //   U+2066..U+2069  (LRI, RLI, FSI, PDI)
+  const sanitised = truncated.replace(
+    BIDI_AND_ZWS_RE,
+    ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'),
+  );
+  // JSON.stringify handles C0/C1 control chars and adds the surrounding
+  // double-quotes.
+  return JSON.stringify(sanitised);
 }
