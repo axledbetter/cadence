@@ -658,6 +658,48 @@ describe('MergeOrchestrator.mergeTask — input validation', () => {
     }
   });
 
+  it('aborts with invalid_task_id when task_id contains git-ref-forbidden sequences (`..`, trailing `.`)', async () => {
+    const env = await setupEnv();
+    try {
+      for (const badId of ['a..b', 'abc.', 'foo@{1}']) {
+        const result = await env.orchestrator.mergeTask({
+          task_id: badId,
+          base_sha: env.initialFeatureBranchSha,
+          task_branch_tip_sha: env.initialFeatureBranchSha,
+          task_branch_name: `autopilot/${env.runId}/${badId}`,
+        });
+        assert.equal(result.status, 'aborted', `bad id "${badId}" should abort`);
+        if (result.status !== 'aborted') return;
+        assert.equal(result.precondition_violated, 'invalid_task_id');
+      }
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('factory throws when runId fails ref-format validation', async () => {
+    const env = await setupEnv();
+    try {
+      assert.throws(
+        () =>
+          createMergeOrchestrator({
+            writer: env.writer,
+            gitQueue: env.gitQueue,
+            runId: '../etc/passwd',
+            featureBranch: env.featureBranch,
+            integrationWorktreePath: env.integrationWorktree,
+            runStateDir: env.runStateDir,
+            repoLockPath: env.repoLockPath,
+            lifecycle: env.lifecycle,
+            initialFeatureBranchSha: env.initialFeatureBranchSha,
+          }),
+        /run_id/,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('aborts with invalid_branch_name when task_branch_name does not match autopilot/<runId>/<taskId>', async () => {
     const env = await setupEnv();
     try {

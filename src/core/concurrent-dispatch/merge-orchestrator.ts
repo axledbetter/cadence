@@ -237,6 +237,19 @@ export function createMergeOrchestrator(
       },
     );
   }
+  // Codex pass 2 WARNING: runId is spliced into the expected branch name
+  // (`autopilot/<runId>/<taskId>`) used for `git branch -D` during cleanup.
+  // Validate at factory time with the same rules as task_id so a malformed
+  // runId fails loudly here rather than producing surprising cleanup
+  // behaviour later.
+  const runIdViolation = validateRunId(opts.runId);
+  if (runIdViolation) {
+    throw new GuardrailError(`merge-orchestrator: ${runIdViolation}`, {
+      code: 'invalid_config',
+      provider: 'merge-orchestrator',
+      details: { runId: opts.runId },
+    });
+  }
 
   let expectedHead = opts.initialFeatureBranchSha;
 
@@ -304,7 +317,7 @@ export function createMergeOrchestrator(
       // direct the cleanup at `main`, `feature/...`, or another branch.
       const failure: PreconditionFailure = {
         precondition: 'invalid_branch_name',
-        reason: `task_branch_name "${task.task_branch_name}" does not match expected "${expectedBranchName}"`,
+        reason: `task_branch_name ${quoteSafe(task.task_branch_name)} does not match expected ${quoteSafe(expectedBranchName)}`,
       };
       await emitMergeAborted(opts, task, failure);
       return {
@@ -952,17 +965,45 @@ function isLikelySha(s: string): boolean {
  * alphanumeric. Rejects `../`, absolute paths, ref tricks, shell metachars,
  * and `.lock` suffixes.
  *
+ * On top of the regex, applies git's own ref-format rules to reject the
+ * subset of strings that pass the regex but git itself disallows:
+ *   - `..` anywhere (git refuses double-dot for refs)
+ *   - trailing `.` (git refuses ref components ending in `.`)
+ *   - leading `.` (already excluded by the regex but covered here too)
+ *   - `@{` (git uses `@{...}` for reflog refs)
+ *
  * Returns null on success, an error message string on rejection.
  */
 const SAFE_TASK_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 function validateTaskId(taskId: unknown): string | null {
   if (typeof taskId !== 'string' || !SAFE_TASK_ID_RE.test(taskId)) {
-    return `task_id "${String(taskId)}" is unsafe — must match ${SAFE_TASK_ID_RE.source}`;
+    return `task_id ${quoteSafe(taskId)} is unsafe — must match ${SAFE_TASK_ID_RE.source}`;
   }
   if (taskId.endsWith('.lock')) {
-    return `task_id "${taskId}" cannot end with .lock (git ref restriction)`;
+    return `task_id ${quoteSafe(taskId)} cannot end with .lock (git ref restriction)`;
+  }
+  // Git ref-format rules that the regex doesn't catch.
+  if (taskId.includes('..')) {
+    return `task_id ${quoteSafe(taskId)} cannot contain ".." (git ref restriction)`;
+  }
+  if (taskId.endsWith('.')) {
+    return `task_id ${quoteSafe(taskId)} cannot end with "." (git ref restriction)`;
+  }
+  if (taskId.includes('@{')) {
+    return `task_id ${quoteSafe(taskId)} cannot contain "@{" (git ref restriction)`;
   }
   return null;
+}
+
+/**
+ * Validate `runId` with the same strict allowlist as `task_id` plus the
+ * same git-ref-format rules. The runId is spliced into the branch name
+ * (`autopilot/<runId>/<taskId>`) and the conflict-report path, so an
+ * unvalidated runId would re-introduce the very class of bugs we fixed
+ * for task_id.
+ */
+function validateRunId(runId: unknown): string | null {
+  return validateTaskId(runId)?.replace('task_id', 'run_id') ?? null;
 }
 
 /**
@@ -976,7 +1017,24 @@ function validateSha(value: unknown, fieldName: string): string | null {
     return `${fieldName} must be a string (got ${typeof value})`;
   }
   if (!/^[0-9a-f]{40}$/.test(value)) {
-    return `${fieldName} "${value}" is not a 40-char lowercase hex SHA`;
+    return `${fieldName} ${quoteSafe(value)} is not a 40-char lowercase hex SHA`;
   }
   return null;
+}
+
+/**
+ * Render an untrusted value as a quoted string suitable for logs / event
+ * payloads. Caps length to 200 chars and escapes control characters so
+ * a maliciously-large or terminal-control-injected value cannot bloat
+ * `events.ndjson` or corrupt terminal output. Codex pass 2 WARNING:
+ * raw echo of untrusted input was a real diagnostic-bloat / log-injection
+ * vector.
+ */
+function quoteSafe(value: unknown): string {
+  const raw = typeof value === 'string' ? value : String(value);
+  const MAX = 200;
+  const truncated = raw.length > MAX ? raw.slice(0, MAX) + `…(truncated, len=${raw.length})` : raw;
+  // Escape control + non-printable chars. JSON.stringify handles this
+  // cleanly and also adds the surrounding double-quotes.
+  return JSON.stringify(truncated);
 }
