@@ -7,7 +7,7 @@
 //   - Git operation queue (PR 2, #198)
 //   - Budget reservation ledger + caps (PR 3, #199)
 //   - Scheduler + worktree lifecycle (PR 4, this PR)
-//   - Merge orchestrator (PR 5, #192 — not yet exported)
+//   - Merge orchestrator (PR 5, #192)
 //
 // Importers should reach for THIS module rather than the underlying files so
 // the internal layout can be reorganized without breaking call sites.
@@ -64,7 +64,7 @@ export {
 export type {
   ConcurrencyConfig,
   MergeDecision,
-  MergeOrchestrator,
+  MergeOrchestrator as SchedulerMergeOrchestratorCallback,
   MergeOrchestratorInput,
   SchedulerDiagnostics,
   SchedulerOptions,
@@ -73,3 +73,14 @@ export type {
   SubagentRunner,
   SubagentRunResult,
 } from './scheduler.ts';
+
+export {
+  createMergeOrchestrator,
+  toSchedulerCallback,
+} from './merge-orchestrator.ts';
+export type {
+  MergeableTask,
+  MergeOrchestrator,
+  MergeOrchestratorOptions,
+  MergeResult,
+} from './merge-orchestrator.ts';
