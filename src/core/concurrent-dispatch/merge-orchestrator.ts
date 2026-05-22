@@ -240,8 +240,81 @@ export function createMergeOrchestrator(
 
   let expectedHead = opts.initialFeatureBranchSha;
 
-  const mergeTask = async (task: MergeableTask): Promise<MergeResult> =>
-    withRepoLock(
+  // Lock ordering: ALWAYS `withRepoLock` (Layer 2 cross-process) BEFORE
+  // `gitQueue.enqueue` (Layer 1 in-process). This matches the scheduler's
+  // `worktree-lifecycle.createTaskWorktree` path in PR4, which also takes
+  // the repo lock first and then enters the queue. Flipping the order
+  // anywhere in the codebase would create classical lock-ordering deadlock:
+  // (A holds repo-lock → waits for queue; B holds queue slot → waits for
+  // repo-lock). The convention is enforced by code review + this comment.
+  const mergeTask = async (task: MergeableTask): Promise<MergeResult> => {
+    // (0) Trust-boundary validation. `MergeableTask` is supplied by the
+    // scheduler, but the scheduler in turn populates it from the
+    // `task.completed` event whose origin is the parsed plan + subagent.
+    // Both are caller-influenced, so we validate before any string is
+    // spliced into a path, ref, or filename.
+    const taskIdViolation = validateTaskId(task.task_id);
+    if (taskIdViolation) {
+      const failure: PreconditionFailure = {
+        precondition: 'invalid_task_id',
+        reason: taskIdViolation,
+      };
+      await emitMergeAborted(opts, task, failure);
+      return {
+        status: 'aborted',
+        reason: failure.reason,
+        precondition_violated: failure.precondition,
+      };
+    }
+    const baseShaViolation = validateSha(task.base_sha, 'base_sha');
+    if (baseShaViolation) {
+      const failure: PreconditionFailure = {
+        precondition: 'invalid_base_sha',
+        reason: baseShaViolation,
+      };
+      await emitMergeAborted(opts, task, failure);
+      return {
+        status: 'aborted',
+        reason: failure.reason,
+        precondition_violated: failure.precondition,
+      };
+    }
+    const tipShaViolation = validateSha(
+      task.task_branch_tip_sha,
+      'task_branch_tip_sha',
+    );
+    if (tipShaViolation) {
+      const failure: PreconditionFailure = {
+        precondition: 'invalid_tip_sha',
+        reason: tipShaViolation,
+      };
+      await emitMergeAborted(opts, task, failure);
+      return {
+        status: 'aborted',
+        reason: failure.reason,
+        precondition_violated: failure.precondition,
+      };
+    }
+    const expectedBranchName = `autopilot/${opts.runId}/${task.task_id}`;
+    if (task.task_branch_name !== expectedBranchName) {
+      // The branch name is "diagnostic only" for the cherry-pick (we use
+      // SHAs), but it IS the argument to `git branch -D` during cleanup.
+      // Refuse to delete any branch that isn't the well-known autopilot/
+      // namespace for this run+task — otherwise a malformed event could
+      // direct the cleanup at `main`, `feature/...`, or another branch.
+      const failure: PreconditionFailure = {
+        precondition: 'invalid_branch_name',
+        reason: `task_branch_name "${task.task_branch_name}" does not match expected "${expectedBranchName}"`,
+      };
+      await emitMergeAborted(opts, task, failure);
+      return {
+        status: 'aborted',
+        reason: failure.reason,
+        precondition_violated: failure.precondition,
+      };
+    }
+
+    return withRepoLock(
       {
         lockPath: opts.repoLockPath,
         command: 'merge-orchestrator',
@@ -409,6 +482,7 @@ export function createMergeOrchestrator(
           };
         }),
     );
+  };
 
   return {
     mergeTask,
@@ -596,9 +670,27 @@ function writeConflictReport(args: {
   cherryPickStderr: string;
   commitShas: string[];
 }): string {
-  const dir = path.join(args.runStateDir, 'conflicts');
-  fs.mkdirSync(dir, { recursive: true });
-  const reportPath = path.join(dir, `${args.task.task_id}.md`);
+  // task_id has been pre-validated by `validateTaskId` at the top of
+  // mergeTask, but we belt-and-braces here too: resolve the final report
+  // path and assert it remains UNDER the conflicts dir. A defence-in-depth
+  // check against a future regression that drops the upstream validator.
+  const conflictsDir = path.resolve(args.runStateDir, 'conflicts');
+  fs.mkdirSync(conflictsDir, { recursive: true });
+  const reportPath = path.resolve(conflictsDir, `${args.task.task_id}.md`);
+  if (!reportPath.startsWith(conflictsDir + path.sep)) {
+    throw new GuardrailError(
+      `conflict report path escaped conflicts dir: ${reportPath}`,
+      {
+        code: 'user_input',
+        provider: 'merge-orchestrator',
+        details: {
+          task_id: args.task.task_id,
+          report_path: reportPath,
+          conflicts_dir: conflictsDir,
+        },
+      },
+    );
+  }
   const conflictingList =
     args.conflictingPaths.length > 0
       ? args.conflictingPaths.map(p => `- ${p}`).join('\n')
@@ -851,4 +943,40 @@ function gitRevListOrdered(
  *  precondition checks with a junk value. */
 function isLikelySha(s: string): boolean {
   return typeof s === 'string' && /^[0-9a-f]{40}$/.test(s);
+}
+
+/**
+ * Strict allowlist for task IDs spliced into filesystem paths (conflict
+ * report) and git refs (cleanup branch name). Mirrors the worktree-lifecycle
+ * regex — ASCII alphanumerics, `.`, `_`, `-`; 1..80 chars; must start with
+ * alphanumeric. Rejects `../`, absolute paths, ref tricks, shell metachars,
+ * and `.lock` suffixes.
+ *
+ * Returns null on success, an error message string on rejection.
+ */
+const SAFE_TASK_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
+function validateTaskId(taskId: unknown): string | null {
+  if (typeof taskId !== 'string' || !SAFE_TASK_ID_RE.test(taskId)) {
+    return `task_id "${String(taskId)}" is unsafe — must match ${SAFE_TASK_ID_RE.source}`;
+  }
+  if (taskId.endsWith('.lock')) {
+    return `task_id "${taskId}" cannot end with .lock (git ref restriction)`;
+  }
+  return null;
+}
+
+/**
+ * Validate that a string is a 40-char lowercase hex SHA. Returns null on
+ * success, a human-readable error string on rejection. Used for
+ * `MergeableTask.base_sha` and `task_branch_tip_sha` so a malformed event
+ * cannot pass garbage to `git rev-list` / `git merge-base`.
+ */
+function validateSha(value: unknown, fieldName: string): string | null {
+  if (typeof value !== 'string') {
+    return `${fieldName} must be a string (got ${typeof value})`;
+  }
+  if (!/^[0-9a-f]{40}$/.test(value)) {
+    return `${fieldName} "${value}" is not a 40-char lowercase hex SHA`;
+  }
+  return null;
 }

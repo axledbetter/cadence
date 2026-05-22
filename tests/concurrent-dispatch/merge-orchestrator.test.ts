@@ -618,6 +618,68 @@ describe('MergeOrchestrator.mergeTask — ancestry / empty range', () => {
 // scheduler's queue/lock invariants.
 // ---------------------------------------------------------------------------
 
+describe('MergeOrchestrator.mergeTask — input validation', () => {
+  it('aborts with invalid_task_id when task_id contains path-traversal segments', async () => {
+    const env = await setupEnv();
+    try {
+      // We can't go through setupTask (which would fail at WorktreeLifecycle's
+      // own validator) — construct a MergeableTask by hand.
+      const result = await env.orchestrator.mergeTask({
+        task_id: '../etc/passwd',
+        base_sha: env.initialFeatureBranchSha,
+        task_branch_tip_sha: env.initialFeatureBranchSha,
+        task_branch_name: `autopilot/${env.runId}/../etc/passwd`,
+      });
+      assert.equal(result.status, 'aborted');
+      if (result.status !== 'aborted') return;
+      assert.equal(result.precondition_violated, 'invalid_task_id');
+
+      // Ensure no file was written outside the conflicts dir.
+      assert.ok(!fs.existsSync('/etc/passwd.md'));
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('aborts with invalid_base_sha when base_sha is not a 40-char hex string', async () => {
+    const env = await setupEnv();
+    try {
+      const result = await env.orchestrator.mergeTask({
+        task_id: '1',
+        base_sha: 'HEAD',
+        task_branch_tip_sha: env.initialFeatureBranchSha,
+        task_branch_name: `autopilot/${env.runId}/1`,
+      });
+      assert.equal(result.status, 'aborted');
+      if (result.status !== 'aborted') return;
+      assert.equal(result.precondition_violated, 'invalid_base_sha');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('aborts with invalid_branch_name when task_branch_name does not match autopilot/<runId>/<taskId>', async () => {
+    const env = await setupEnv();
+    try {
+      const result = await env.orchestrator.mergeTask({
+        task_id: '1',
+        base_sha: env.initialFeatureBranchSha,
+        task_branch_tip_sha: env.initialFeatureBranchSha,
+        task_branch_name: 'main', // would otherwise be deleted by cleanup!
+      });
+      assert.equal(result.status, 'aborted');
+      if (result.status !== 'aborted') return;
+      assert.equal(result.precondition_violated, 'invalid_branch_name');
+
+      // main branch must still exist.
+      const mainSha = git(env.repoDir, 'rev-parse', 'main').trim();
+      assert.equal(mainSha.length, 40);
+    } finally {
+      await env.cleanup();
+    }
+  });
+});
+
 describe('MergeOrchestrator.mergeTask — concurrency primitives', () => {
   it('routes through both the git queue and the repo lock without deadlocking', async () => {
     const env = await setupEnv();
