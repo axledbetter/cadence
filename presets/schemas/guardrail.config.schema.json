@@ -13,8 +13,8 @@
     },
     "budgets": {
       "type": "object",
-      "additionalProperties": false,
-      "description": "Cost caps in USD. `perRunUSD` and `perPhaseUSD` are enforced run-wide. `perSubagentUSD` is a HARD cap per concurrent subagent — dispatch is rejected if the preflight estimate exceeds it, and a running subagent is SIGTERMed if its actual cost overruns the cap. Leave `perSubagentUSD` null/omitted to fall back to a soft `perRunUSD`-only reservation model.",
+      "additionalProperties": true,
+      "description": "Cost caps in USD. `perRunUSD` and `perPhaseUSD` are enforced run-wide. `perSubagentUSD` is a HARD cap per concurrent subagent — dispatch is rejected if the preflight estimate exceeds it, and a running subagent is SIGTERMed if its actual cost overruns the cap. Leave `perSubagentUSD` null/omitted to fall back to a soft `perRunUSD`-only reservation model. additionalProperties is intentionally `true` in v7.11.0 for backwards-compatibility with existing user configs that may carry historical budget keys; a future minor will enumerate the full set and tighten this to `false`.",
       "properties": {
         "perRunUSD": {
           "type": "number",

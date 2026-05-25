@@ -57,7 +57,10 @@ Implementation PRs:
   `task.merge_conflict`, `task.merge_aborted`, `task.timeout`,
   `task.budget_halt`. All event writes route through a per-run serialized
   writer that holds an exclusive `flock` on `events.ndjson` for the
-  `(replay → check → append → fsync → release)` critical section.
+  `(replay → check → append → release)` critical section. **The
+  append is a single `O_APPEND` write (atomic at the byte level) but
+  is NOT followed by `fsync` per event** — see "Audit-log durability"
+  below for the rationale and the no-fsync limitation.
 - **Cross-process repo lock** at `.claude/run-state/repo.lock`, acquired
   by every CLI command that mutates repo state (autopilot, run resume,
   runs gc, runs cleanup). Uses `flock(LOCK_EX|LOCK_NB)` — NOT
