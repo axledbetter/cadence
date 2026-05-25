@@ -204,6 +204,20 @@ export const bedrockAdapter: ReviewEngine = {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Codex WARNING (pass 2 #2): AWS SDK credential-provider failures
+      // (no creds resolved from ECS task role / instance metadata / SSO /
+      // env / shared config) surface as `CredentialsProviderError` or
+      // similar low-level errors. Catch these explicitly and surface a
+      // clean `auth` GuardrailError with actionable wording instead of the
+      // raw SDK message.
+      const isCredentialError =
+        /credential|could not load credentials|no credentials|credentialsprovider/i.test(message);
+      if (isCredentialError) {
+        throw new GuardrailError(
+          `Bedrock credential resolution failed via the AWS SDK default chain (ECS task role / instance metadata / SSO / shared config / env vars). Underlying error: ${message}`,
+          { code: 'auth', provider: 'bedrock', retryable: false },
+        );
+      }
       const code = classifyError(message);
       throw new GuardrailError(`Bedrock review call failed: ${message}`, {
         code,

@@ -356,6 +356,49 @@ describe('bedrockAdapter — error mapping (mocked SDK)', () => {
   });
 });
 
+describe('bedrockAdapter — credential resolution error wrapping (Codex pass-2 WARNING)', () => {
+  before(() => {
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+  });
+  after(async () => {
+    const { __setBedrockSdkLoader } = await import('../src/adapters/review-engine/bedrock.ts');
+    __setBedrockSdkLoader(null);
+    restoreEnv();
+  });
+
+  it('wraps AWS SDK CredentialsProviderError as auth GuardrailError', async () => {
+    const mockMod = {
+      BedrockRuntimeClient: class {
+        async send() {
+          // Simulate the @aws-sdk credential resolution failure shape
+          throw new Error('Could not load credentials from any providers');
+        }
+      },
+      InvokeModelCommand: class {
+        constructor(public input: unknown) {}
+      },
+      InvokeModelWithResponseStreamCommand: class {
+        constructor(public input: unknown) {}
+      },
+    };
+    const { bedrockAdapter, __setBedrockSdkLoader } = await import(
+      '../src/adapters/review-engine/bedrock.ts'
+    );
+    __setBedrockSdkLoader(async () => mockMod);
+    try {
+      await bedrockAdapter.review({ content: 'x', kind: 'file-batch' });
+      assert.fail('should have rejected');
+    } catch (err) {
+      const e = err as Error & { code?: string; retryable?: boolean };
+      assert.equal(e.code, 'auth');
+      assert.equal(e.retryable, false);
+      assert.ok(e.message.includes('default chain'));
+    }
+    __setBedrockSdkLoader(null);
+  });
+});
+
 describe('bedrockAdapter — streaming (mocked SDK)', () => {
   before(() => {
     process.env.AWS_ACCESS_KEY_ID = 'AKIA_TEST';

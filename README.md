@@ -305,7 +305,7 @@ chunking:
 
 The `openai-compatible` adapter speaks the standard OpenAI Chat Completions wire shape. Each of the providers below is configured via the OpenAI-compatible adapter — pick one, paste the snippet into `guardrail.config.yaml`, and set the named env var.
 
-> **Security note.** `openai-compatible` accepts an arbitrary `baseUrl` and `apiKeyEnv` from your `guardrail.config.yaml`. The named env var's value is sent as the API key to that URL. **Only use `openai-compatible` with `guardrail.config.yaml` files you trust** — if an attacker can edit your config (e.g. via an unreviewed PR or untrusted repo), they can point `baseUrl` at an attacker-controlled endpoint and set `apiKeyEnv` to a sensitive variable name to exfiltrate it. Treat `guardrail.config.yaml` like any other secret-adjacent config file in code review. The direct provider adapters (`bedrock`, `azure`, `cohere`, `mistral`, `claude`, `gemini`, `codex`) use fixed env var names and fixed endpoints, so they are not subject to this concern.
+> **Security note.** `openai-compatible` accepts an arbitrary `baseUrl` and `apiKeyEnv` from your `guardrail.config.yaml`. The named env var's value is sent as the API key to that URL. **Only use `openai-compatible` with `guardrail.config.yaml` files you trust** — if an attacker can edit your config (e.g. via an unreviewed PR or untrusted repo), they can point `baseUrl` at an attacker-controlled endpoint and set `apiKeyEnv` to a sensitive variable name to exfiltrate it. Treat `guardrail.config.yaml` like any other secret-adjacent config file in code review. The direct provider adapters (`bedrock`, `azure`, `cohere`, `mistral`, `claude`, `gemini`, `codex`) use fixed credential env var names; `claude`, `gemini`, `codex`, `bedrock`, `cohere`, `mistral` also use fixed endpoints. `azure`'s `AZURE_OPENAI_ENDPOINT` is operator-provided but is validated to be `https://` origin-only before any credential is sent — it cannot be coerced into pointing at an arbitrary attacker host via a config file alone (the operator must set the env var on the host).
 
 | Provider | `baseUrl` | `apiKeyEnv` |
 |---|---|---|
@@ -423,7 +423,10 @@ reviewEngine:
 #   config / env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, optionally
 #   AWS_SESSION_TOKEN for STS). The secure pattern in ECS/EKS is to use a
 #   task role and NOT set static keys in env.
-# Optional: AWS_REGION (default us-east-1).
+# Region: resolved from options.region → AWS_REGION env → us-east-1 default.
+#   The AWS SDK's own profile/SSO-config region resolution is NOT consulted
+#   — set AWS_REGION explicitly for non-us-east-1 Bedrock deployments where
+#   the model is enabled in another region (e.g. us-west-2, eu-west-3).
 # Install: npm install @aws-sdk/client-bedrock-runtime
 ```
 
