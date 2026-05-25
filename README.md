@@ -2,10 +2,24 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![GitHub](https://img.shields.io/badge/GitHub-axledbetter%2Fcadence-181717?logo=github)](https://github.com/axledbetter/cadence) [![npm](https://img.shields.io/npm/v/@delegance/cadence.svg)](https://www.npmjs.com/package/@delegance/cadence)
 
-> **Formerly known as `@delegance/claude-autopilot`.** As of v8.0.0 the package has been renamed to `@delegance/cadence` and the CLI binary is `cadence`. The old `claude-autopilot` (and `guardrail`) bins remain as aliases through the v8.x line. To migrate:
+> **Formerly known as `@delegance/claude-autopilot`.** As of v8.0.0 the package has been renamed to `@delegance/cadence` and the CLI binary is `cadence`. The old `claude-autopilot` (and `guardrail`) bins remain as aliases through the v8.x line.
+>
+> **CLI / global-install migration:**
 >
 > ```bash
-> npm uninstall -g @delegance/claude-autopilot && npm install -g @delegance/cadence
+> # Uninstall BOTH legacy packages first to avoid global-bin collisions
+> npm uninstall -g @delegance/claude-autopilot @delegance/guardrail
+> npm install -g @delegance/cadence
+> cadence --version  # 8.0.0
+> ```
+>
+> **Library / in-process import migration is NOT alias-backed.** The bin aliases (`claude-autopilot`, `guardrail`) keep working through v8.x, but if you `import` from the package in code, you must update every import path now — `@delegance/claude-autopilot` is deprecated and its subpath exports (`.../run-state/sameness-detector`, `.../concurrent-dispatch`) are reachable only under the new `@delegance/cadence` name:
+>
+> ```ts
+> // before
+> import { computeFingerprint } from '@delegance/claude-autopilot/run-state/sameness-detector';
+> // after (v8.0.0)
+> import { computeFingerprint } from '@delegance/cadence/run-state/sameness-detector';
 > ```
 >
 > The old npm package is deprecated but still installable; the GitHub repo at `axledbetter/claude-autopilot` redirects to `axledbetter/cadence`.

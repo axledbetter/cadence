@@ -11,9 +11,11 @@ v8.0.0 is a rename and a re-introduction, not a feature release.
 
 ### Migration
 
+**Global CLI:**
+
 ```bash
-# Replace the old install with the new one
-npm uninstall -g @delegance/claude-autopilot
+# Uninstall BOTH legacy packages first to avoid global-bin collisions
+npm uninstall -g @delegance/claude-autopilot @delegance/guardrail
 npm install -g @delegance/cadence
 
 # Prefer the new bin name everywhere
@@ -25,6 +27,24 @@ The legacy `claude-autopilot` and `guardrail` CLI binaries continue to
 work as aliases for the entire `v8.x` line. Scripts and CI pipelines that
 invoke `claude-autopilot` keep working without changes. Migrate at your
 own pace; we will drop the legacy bin no sooner than `v9.0.0`.
+
+**Library / in-process imports (NOT alias-backed):**
+
+If you `import` from the package in code, you must update every import
+path now. The bin aliases keep working, but the legacy package's subpath
+exports are unreachable from the new package name:
+
+```ts
+// before
+import { computeFingerprint } from '@delegance/claude-autopilot/run-state/sameness-detector';
+import * as concurrent from '@delegance/claude-autopilot/concurrent-dispatch';
+
+// after (v8.0.0)
+import { computeFingerprint } from '@delegance/cadence/run-state/sameness-detector';
+import * as concurrent from '@delegance/cadence/concurrent-dispatch';
+```
+
+The same applies to the default export and the runtime `import('@delegance/cadence')`.
 
 ### What changed
 
@@ -55,12 +75,16 @@ own pace; we will drop the legacy bin no sooner than `v9.0.0`.
   `package.json` declaring `@delegance/cadence` OR the legacy
   `@delegance/claude-autopilot`. Existing v7.x consumer trees keep
   working under the helper.
-- **Guardrail tombstone (`@delegance/guardrail`) probe order updated.**
-  When forwarding `guardrail` invocations, the tombstone now tries
-  `@delegance/cadence` first and falls back to `@delegance/claude-autopilot`,
-  so the v5-era guardrail wrapper transparently picks up the new package.
-  No re-publish of the tombstone is required for the v8 ship; future
-  tombstone releases will pick up the change automatically.
+- **Guardrail tombstone (`@delegance/guardrail`) probe order updated
+  in-tree.** When forwarding `guardrail` invocations, the new tombstone
+  source tries `@delegance/cadence` first and falls back to
+  `@delegance/claude-autopilot`. Note: **this change only takes effect
+  for users who upgrade `@delegance/guardrail` to a version published
+  AFTER v8.0.0**. Users still on the currently-published tombstone
+  (which only probes `@delegance/claude-autopilot`) will forward to the
+  deprecated old package; npm's deprecation message will then point
+  them at `@delegance/cadence`. A republish of the tombstone is the
+  cleanest path here and is a follow-up to this ship.
 
 ### What did NOT change
 
