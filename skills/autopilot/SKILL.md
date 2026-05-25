@@ -188,26 +188,81 @@ Output: Plan at docs/superpowers/plans/YYYY-MM-DD-<topic>.md
 
 After the plan is written but BEFORE committing it, run `npx tsx scripts/codex-review.ts <plan-path>`. Apply CRITICAL findings (sequencing errors, missing test coverage on a load-bearing path, schema/migration ordering bugs) to the plan inline. Then commit. Always use subagent-driven development for execution — do not ask the user.
 
-### Step 2: Set up worktree
+### Step 2: Set up feature branch (ref only — do NOT check out in main worktree)
 
 ```
 Invoke: superpowers:using-git-worktrees
 Branch: feature/<topic-slug>
+Mode:   create as a ref only; leave the main worktree on its prior branch.
 ```
 
-### Step 3: Execute plan
+Step 2 creates `feature/<topic-slug>` but does NOT check it out in the main
+worktree. Concurrent dispatch (Step 3) will create the SOLE checkout of the
+feature branch in `.claude/worktrees/<run-ulid>/integration/` — git linked
+worktrees forbid the same branch being checked out twice, so the scheduler
+must own the only checkout. The main repo working tree stays untouched for the
+entire run.
+
+If you are using `superpowers:using-git-worktrees`, pass it the "branch only,
+no checkout" mode (or equivalent) so it stops at `git branch
+feature/<topic-slug> <base-sha>` and does not run `git checkout` /
+`git worktree add` against the main repo.
+
+### Step 3: Execute plan (concurrent dispatch)
 
 ```
-Invoke: superpowers:subagent-driven-development
-Input: The plan file
-Mode: dispatch fresh subagent per task
+Invoke: claude-autopilot's concurrent dispatcher
+Input:  The plan file (with depends_on: annotations where applicable)
+Mode:   dispatch fresh subagents in parallel per the dep graph
 ```
 
-For each task:
-- Dispatch implementer subagent
-- On completion: verify commit landed in worktree
-- Skip formal spec/quality review to maintain speed (the validate step catches issues)
-- If subagent fails to write to worktree: implement directly
+**Default effective concurrency:**
+`min(3, providerRateLimitConcurrency, taskCount)`.
+Override via `guardrail.config.yaml` `concurrency.maxParallelSubagents`
+(schema range `1..8`).
+
+**Fallback rule (single source of truth — also enforced in
+`src/core/concurrent-dispatch/dep-graph.ts`):**
+
+- If `concurrency.maxParallelSubagents: 1` → sequential (reproduces v7.10.0
+  behavior exactly).
+- If ZERO tasks in the plan have `depends_on:` annotations → sequential,
+  unless `concurrency.assumeIndependentWithoutDependsOn: true` (opt in to
+  file-overlap inference).
+- If at least one task has `depends_on:` → use the explicit deps + fall back
+  to file-overlap inference for the remaining unannotated tasks.
+
+For each task, the scheduler:
+- creates a per-task worktree at `.claude/worktrees/<run-ulid>/<task-id>/`,
+  branched from the current feature tip (`base_sha` captured at dispatch);
+- dispatches an implementer subagent to commit on
+  `autopilot/<run-ulid>/<task-id>`;
+- on success, runs the merge orchestrator (under the cross-process repo lock)
+  to cherry-pick `base_sha..task_branch_tip_sha` onto the integration
+  worktree's `feature/<topic-slug>` checkout in plan-declaration order.
+
+**On any task failure**: halt the run, SIGTERM in-flight subagent process
+groups (kill -TERM -<pgid>; SIGKILL after 30s if no response), and surface a
+breakdown to the user:
+- `merged`: tasks whose commits are on the feature branch (guaranteed-good
+  set).
+- `completed-but-unmerged`: commits exist on per-task branches; worktrees
+  preserved for inspection.
+- `in-flight`: subagents that received SIGTERM; worktrees preserved.
+
+**On cherry-pick conflict**: diagnostics are written to
+`.claude/run-state/<run-ulid>/conflicts/<task-id>.md` BEFORE
+`cherry-pick --abort` runs; the run halts and the user resolves manually
+(add an explicit `depends_on:` to the plan, or fix the conflict in the
+preserved worktree).
+
+**Subagent contract:** subagent writes its own commits in its worktree. If
+the subagent fails to write to its worktree, fall back to direct
+implementation in that worktree only — never in the integration worktree or
+main repo working tree.
+
+Skip formal spec/quality review per task to maintain speed; the validate
+step (Step 4) catches issues across the merged feature branch.
 
 ### Step 4: Validate
 
