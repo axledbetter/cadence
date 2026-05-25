@@ -149,6 +149,21 @@ Rules:
 
 When the user describes multiple independent deliverables in one invocation (e.g., "ship A, B, and C as separate PRs"), dispatch them as **parallel Agent subagent invocations** in a single message — each in its own isolated worktree (`isolation: "worktree"`), each running its own end-to-end pipeline (brainstorm → spec → plan → implement → validate → PR → codex-review → bugbot). Do not serialize them. Concurrent dispatch is the default unless explicit serialization is requested. Only serialize when the user explicitly says so OR the deliverables depend on each other.
 
+### Independence preflight (run before dispatching concurrently)
+
+Before fanning out, do a quick dependency/conflict scan. Serialize (or designate ONE coordinator PR for the shared edit) when any of the following are true for two or more proposed deliverables:
+
+- **Shared release metadata**: root `package.json` version, `package-lock.json`, workspace `package.json` versions, `CHANGELOG.md`, release notes.
+- **Shared schema or contracts**: DB migrations (`data/deltas/` or equivalent), RLS policies, generated types (`types/supabase.ts` or equivalent), public API contracts, OpenAPI/JSON schemas.
+- **Shared infrastructure**: queue/topic names, env-var registry, shared TypeScript types/interfaces consumed by all PRs, monorepo config (`tsconfig`, `nx.json`, workspace globs).
+- **Same module/route**: PRs that all touch the same handler, the same React component tree, or the same service file.
+
+If file ownership across the PRs is genuinely disjoint AND none of the shared-artifact categories above apply, proceed concurrently. Otherwise, either serialize (run sequentially in dependency order) or split out the shared edit into a single coordinator PR that lands first, then dispatch the dependent PRs concurrently against the post-merge base.
+
+### Avoid duplicated global edits across concurrent subagents
+
+When dispatched concurrently, individual feature subagents should NOT independently bump versions, edit `CHANGELOG.md`, regenerate lockfiles, or touch release metadata unless the parent operator has explicitly assigned that edit to exactly one subagent. The default for a fan-out is: feature code only in each subagent; release/version/changelog changes go in a separate coordinator PR or are added by the operator after the fan-out merges. This prevents merge conflicts on global artifacts that are otherwise unrelated to each PR's feature work.
+
 ## Step 0: Brainstorming with per-step Codex validation
 
 **Skip this step entirely if a spec already exists.** Otherwise:
