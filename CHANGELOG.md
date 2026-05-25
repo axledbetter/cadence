@@ -2,6 +2,12 @@
 
 - v5.6 Phase 7 (docs reconciliation) — pending.
 
+## 7.11.1 — 2026-05-25
+
+### Added
+
+- **Concurrent multi-PR dispatch default in `skills/autopilot/SKILL.md`.** When the user describes multiple independent deliverables in one invocation, the autopilot skill now instructs dispatch as parallel Agent subagent invocations (each in its own worktree-isolated branch). Only serializes on explicit user request or genuine cross-PR dependency. Previously this default was only documented in operator-side overrides.
+
 ## 7.11.0 — 2026-05-20
 
 **v7.11.0 — Concurrent subagent dispatch (GA).** This release closes the
