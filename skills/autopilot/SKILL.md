@@ -145,6 +145,10 @@ Rules:
 - Specs may contain sensitive architecture details (tenant/RLS behavior, auth flows, schema names, internal endpoints). The "no secrets" rule extends to "no production-sensitive design content in tempfiles you'd be uncomfortable surfacing"; paraphrase such content before writing
 - Never write secrets, API keys, or production credentials to tempfiles regardless of location
 
+## DEFAULT: Concurrent multi-PR dispatch when the user supplies multiple independent deliverables
+
+When the user describes multiple independent deliverables in one invocation (e.g., "ship A, B, and C as separate PRs"), dispatch them as **parallel Agent subagent invocations** in a single message — each in its own isolated worktree (`isolation: "worktree"`), each running its own end-to-end pipeline (brainstorm → spec → plan → implement → validate → PR → codex-review → bugbot). Do not serialize them. Concurrent dispatch is the default unless explicit serialization is requested. Only serialize when the user explicitly says so OR the deliverables depend on each other.
+
 ## Step 0: Brainstorming with per-step Codex validation
 
 **Skip this step entirely if a spec already exists.** Otherwise:
