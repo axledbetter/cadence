@@ -1,4 +1,65 @@
-## Unreleased
+## Unreleased — v8.1.0 target
+
+### Added
+
+- **4 new direct provider adapters for `reviewEngine`.** All four are
+  additive — no breaking changes to existing `auto`, `claude`, `gemini`,
+  `codex`, or `openai-compatible` adapters.
+  - **`bedrock`** — AWS Bedrock runtime. Default model
+    `anthropic.claude-sonnet-4-5-20250929-v1:0` (config-overridable).
+    Streaming supported. Auth via standard AWS env vars
+    (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_REGION`
+    default `us-east-1`, optional `AWS_SESSION_TOKEN` for STS). SDK:
+    `@aws-sdk/client-bedrock-runtime` (added as optional dep).
+  - **`azure`** — Azure OpenAI. Deployment-routed
+    (`{endpoint}/openai/deployments/{deployment}`) with required
+    `api-version` query parameter (default `2024-10-21`). Uses `api-key`
+    header (Azure convention, not `Authorization: Bearer`). Reuses the
+    existing OpenAI SDK — no new dep. Env:
+    `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`,
+    `AZURE_OPENAI_DEPLOYMENT_NAME`, optional
+    `AZURE_OPENAI_API_VERSION`.
+  - **`cohere`** — Cohere v2 chat. Default model
+    `command-r-plus-08-2024` (config-overridable). Streaming supported
+    via `chatStream`. Env: `COHERE_API_KEY`. SDK: `cohere-ai` (added as
+    optional dep).
+  - **`mistral`** — Mistral La Plateforme. Default model
+    `mistral-large-latest`. Streaming supported. Reuses the OpenAI SDK
+    with `baseURL: https://api.mistral.ai/v1` — no separate dep. Env:
+    `MISTRAL_API_KEY`.
+- **Error-mapping parity** across all four new adapters: 401/403 → `auth`
+  code, 429 → `rate_limit` code, 5xx / network → `transient_network`
+  code (retryable). Uses the shared `classifyError` helper.
+- **README "OpenAI-compatible providers" section.** Documents 7 additional
+  providers covered by the existing `openai-compatible` adapter
+  out-of-the-box, with copy-paste YAML snippets:
+  Together AI, Anyscale, Fireworks, OpenRouter, Perplexity, DeepInfra,
+  Hyperbolic (in addition to the previously documented Groq and Ollama).
+- **68 new tests** (1941 → 2009): per-adapter unit tests with mocked SDK
+  boundaries (defaults, env validation, model overrides, streaming
+  accumulation, error mapping for 401/403/429/5xx), plus an
+  openai-compatible coverage test that verifies every documented
+  `baseUrl` parses as a valid HTTPS URL and the adapter accepts each
+  config without `invalid_config` errors at parse time.
+
+### Changed
+
+- **`src/adapters/loader.ts`** — registered `bedrock`, `azure`, `cohere`,
+  `mistral` as built-in `review-engine` adapter names.
+- **`src/adapters/sdk-loader.ts`** — added `loadBedrockRuntime()` and
+  `loadCohere()` lazy loaders following the same module-not-found-throws-
+  install-hint pattern as the existing Anthropic/OpenAI/Google loaders.
+
+### Notes
+
+- **Total provider count: 16+** — 5 original built-in adapters (`auto`,
+  `claude`, `gemini`, `codex`, `openai-compatible`) + 4 new direct
+  adapters + 7+ providers documented via `openai-compatible`.
+- **No version bump in this PR** — the parallel v8.0.0 rename PR is
+  shipping concurrently; version is bumped to 8.1.0 in a follow-up commit
+  after both land.
+- **No breaking changes** — all changes are additive. Existing configs
+  continue to work unchanged.
 
 - v5.6 Phase 7 (docs reconciliation) — pending.
 
