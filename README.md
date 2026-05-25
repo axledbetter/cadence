@@ -13,7 +13,7 @@
 > cadence --version  # 8.0.0
 > ```
 >
-> **Library / in-process import migration is NOT alias-backed.** The bin aliases (`claude-autopilot`, `guardrail`) keep working through v8.x, but if you `import` from the package in code, you must update every import path now — `@delegance/claude-autopilot` is deprecated and its subpath exports (`.../run-state/sameness-detector`, `.../concurrent-dispatch`) are reachable only under the new `@delegance/cadence` name:
+> **Library / in-process import migration is NOT alias-backed.** The bin aliases (`claude-autopilot`, `guardrail`) keep working through v8.x, but **do not rely on legacy package imports for v8 code — update all `@delegance/claude-autopilot/...` imports to `@delegance/cadence/...` immediately.** `@delegance/claude-autopilot` is deprecated and its subpath exports (`.../run-state/sameness-detector`, `.../concurrent-dispatch`) are reachable only under the new `@delegance/cadence` name:
 >
 > ```ts
 > // before
