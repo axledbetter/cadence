@@ -13,13 +13,13 @@ export type { GuardrailConfig, AdapterRef, AdapterReference } from './core/confi
 // don't change the exported shape are SemVer-minor or patch.
 //
 // Functions deliberately NOT re-exported (still callable via direct
-// `@delegance/claude-autopilot/cli/*` imports if you really need them, but
+// `@delegance/cadence/cli/*` imports if you really need them, but
 // no compatibility guarantee):
 //   - JSON-envelope wrappers (`runUnderJsonMode`, `runAutopilotWithJsonEnvelope`)
 //     — those are CLI-shape helpers, not library shape.
 //   - Internal `_*` helpers and test seams.
 //   - The `runs` / `runs-watch` group — engine introspection is a separate
-//     v8 prerequisite (`@delegance/claude-autopilot/run-state` will export
+//     daemon prerequisite (`@delegance/cadence/run-state` will export
 //     it once it's stable).
 //
 // See docs/library-api.md for the full surface + usage examples.

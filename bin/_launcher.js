@@ -1,6 +1,12 @@
-// Shared launcher for both `claude-autopilot` and `guardrail` bins.
+// Shared launcher for `cadence`, `claude-autopilot`, and `guardrail` bins.
 // Imported, not a bin itself. Resolves tsx, spawns src/cli/index.ts with
 // the caller's argv, forwards stdio, exits with the child's status.
+//
+// v8.0.0 — package renamed @delegance/claude-autopilot → @delegance/cadence.
+// `cadence` is the primary bin; `claude-autopilot` and `guardrail` stay as
+// aliases through the v8.x line. Env var names (CLAUDE_AUTOPILOT_*) are
+// preserved verbatim — renaming them would force another breaking change
+// on operators for zero payoff.
 
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -218,13 +224,13 @@ function stateDir() {
 
 const TSX_DEPRECATION_MESSAGE =
   '\n' +
-  '[deprecation] @delegance/claude-autopilot is using its bundled `tsx` to run\n' +
-  '              your TypeScript scripts. In v8.0.0, `tsx` will be removed from\n' +
-  '              runtime deps and you will need to install it yourself:\n' +
+  '[deprecation] @delegance/cadence is using its bundled `tsx` to run\n' +
+  '              your TypeScript scripts. In a future major, `tsx` will be removed\n' +
+  '              from runtime deps and you will need to install it yourself:\n' +
   '\n' +
   '                  npm install -D tsx\n' +
   '\n' +
-  '              To silence this warning now and prepare for v8.0.0:\n' +
+  '              To silence this warning now and prepare for the next major:\n' +
   '                1. Add `tsx` to your project devDependencies, OR\n' +
   '                2. Set `CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1` in your env.\n' +
   '\n' +
@@ -270,7 +276,7 @@ function findTsx() {
     const p = projectLocalTsxPath();
     if (!p) {
       process.stderr.write(
-        `[claude-autopilot] Error: ${forcedBy}=project requested but no project-local tsx found.\n` +
+        `[cadence] Error: ${forcedBy}=project requested but no project-local tsx found.\n` +
         '  Install tsx in your project: npm install -D tsx\n' +
         '  Or unset the override.\n',
       );
@@ -282,7 +288,7 @@ function findTsx() {
     const p = pathTsxPath();
     if (!p) {
       process.stderr.write(
-        `[claude-autopilot] Error: ${forcedBy}=path requested but no tsx found on PATH.\n` +
+        `[cadence] Error: ${forcedBy}=path requested but no tsx found on PATH.\n` +
         '  Install tsx globally (npm install -g tsx) or unset the override.\n',
       );
       process.exit(2);
@@ -293,8 +299,8 @@ function findTsx() {
     const p = bundledTsxPath();
     if (!p) {
       process.stderr.write(
-        `[claude-autopilot] Error: ${forcedBy}=bundled requested but the bundled tsx is missing.\n` +
-        '  Reinstall @delegance/claude-autopilot or unset the override.\n',
+        `[cadence] Error: ${forcedBy}=bundled requested but the bundled tsx is missing.\n` +
+        '  Reinstall @delegance/cadence or unset the override.\n',
       );
       process.exit(2);
     }
@@ -310,7 +316,7 @@ function findTsx() {
   const bundled = bundledTsxPath();
   if (!bundled) {
     process.stderr.write(
-      '[claude-autopilot] Error: bundled tsx is missing — reinstall @delegance/claude-autopilot.\n',
+      '[cadence] Error: bundled tsx is missing — reinstall @delegance/cadence.\n',
     );
     process.exit(2);
   }
@@ -377,7 +383,7 @@ function shouldEmitDeprecation() {
 
 /**
  * Launch the CLI with `argv` passed through verbatim.
- * @param {{ name: 'claude-autopilot' | 'guardrail' }} opts
+ * @param {{ name: 'cadence' | 'claude-autopilot' | 'guardrail' }} opts
  */
 export function launch(opts) {
   if (opts.name === 'guardrail' && shouldEmitDeprecation()) {
@@ -399,10 +405,10 @@ export function launch(opts) {
   const entry = resolveEntry();
   if (!entry) {
     process.stderr.write(
-      '[claude-autopilot] Could not find CLI entrypoint. Expected either\n' +
+      '[cadence] Could not find CLI entrypoint. Expected either\n' +
       `  ${COMPILED} (compiled) or\n` +
       `  ${SOURCE} (source)\n` +
-      'Reinstall: npm install -g @delegance/claude-autopilot@alpha\n',
+      'Reinstall: npm install -g @delegance/cadence@latest\n',
     );
     process.exit(127);
   }
@@ -427,7 +433,7 @@ export function launch(opts) {
 
   if (result.error) {
     // ENOENT or similar spawn failure — surface cleanly instead of hanging.
-    process.stderr.write(`[claude-autopilot] Failed to launch CLI: ${result.error.message}\n`);
+    process.stderr.write(`[cadence] Failed to launch CLI: ${result.error.message}\n`);
     process.exit(127);
   }
   if (result.signal) {

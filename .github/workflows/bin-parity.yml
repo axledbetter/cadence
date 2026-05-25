@@ -51,12 +51,22 @@ jobs:
       - name: Pack and install globally
         run: |
           npm pack
-          # Windows bash wildcard expansion differs — use a for loop for safety
-          for tarball in delegance-claude-autopilot-*.tgz; do
+          # v8.0.0 — tarball name is now delegance-cadence-*.tgz. Keep the legacy
+          # delegance-claude-autopilot-* glob as a fallback for any older branches
+          # this workflow might run on. Windows bash wildcard expansion differs —
+          # use a for loop for safety.
+          for tarball in delegance-cadence-*.tgz delegance-claude-autopilot-*.tgz; do
+            [ -e "$tarball" ] || continue
             npm install -g "$tarball"
           done
 
-      - name: claude-autopilot --version
+      - name: cadence --version (primary bin, v8.0.0+)
+        run: |
+          OUT=$(cadence --version)
+          echo "got: $OUT"
+          echo "$OUT" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || exit 1
+
+      - name: claude-autopilot --version (legacy alias)
         run: |
           OUT=$(claude-autopilot --version)
           echo "got: $OUT"

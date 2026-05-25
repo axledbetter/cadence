@@ -55,7 +55,8 @@ function loadAliasMap(repoRoot: string): AliasMap | null {
   //   1. repoRoot/presets/aliases.lock.json — repo-local override (e.g. monorepo)
   //   2. <package-root>/presets/aliases.lock.json — installed package
   // findPackageRoot walks up from this module looking for the package.json
-  // declaring '@delegance/claude-autopilot', so it works under both source and
+  // declaring '@delegance/cadence' (or legacy '@delegance/claude-autopilot'),
+  // so it works under both source and
   // compiled (dist/) layouts. Earlier code used __dirname + '../../..' which
   // landed at <install>/dist/presets/ in the published tarball (presets/ ships
   // at the package root, not under dist/).

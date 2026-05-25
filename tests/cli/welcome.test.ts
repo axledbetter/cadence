@@ -31,21 +31,25 @@ describe('welcome screen (bare invocation)', () => {
     assert.equal(r.code, 0);
   });
 
-  it('WS2: shows @delegance/claude-autopilot branding', () => {
+  it('WS2: shows Cadence branding (with legacy name for migration discoverability)', () => {
     const r = runCli([]);
-    assert.ok(r.stdout.includes('@delegance/claude-autopilot'), `stdout: ${r.stdout}`);
+    assert.ok(r.stdout.includes('Cadence'), `stdout missing Cadence branding: ${r.stdout}`);
+    assert.ok(r.stdout.includes('@delegance/cadence'), `stdout missing @delegance/cadence package name: ${r.stdout}`);
+    // Keep the legacy package name visible in the welcome banner so users
+    // who installed `@delegance/claude-autopilot` see the rename immediately.
+    assert.ok(r.stdout.includes('claude-autopilot'), `stdout missing legacy name for migration discoverability: ${r.stdout}`);
   });
 
   it('WS3: shows Quick start section with pipeline + review entrypoints', () => {
     const r = runCli([]);
-    // Pipeline brainstorm is the new top-billing quickstart. Review commands
-    // (`claude-autopilot run`) remain shown as the v4-compatible alternative.
+    // Pipeline brainstorm is the top-billing quickstart. Review commands
+    // (`cadence run`) remain shown as the v4-compatible alternative.
     assert.ok(
       r.stdout.includes('brainstorm'),
       `stdout is missing pipeline brainstorm quickstart: ${r.stdout}`,
     );
     assert.ok(
-      r.stdout.includes('claude-autopilot run'),
+      r.stdout.includes('cadence run') || r.stdout.includes('claude-autopilot run'),
       `stdout is missing review-phase run command: ${r.stdout}`,
     );
   });
@@ -87,7 +91,9 @@ describe('welcome screen (bare invocation)', () => {
 
 function assertAllSuggestedSubcommandsRoute(output: string, source: string): void {
   const suggested = new Set<string>();
-  for (const m of output.matchAll(/claude-autopilot\s+([\w-]+)/g)) {
+  // v8.0.0 — match either the primary `cadence` bin OR the legacy `claude-autopilot`
+  // alias, both of which the welcome/help text advertises.
+  for (const m of output.matchAll(/(?:cadence|claude-autopilot)\s+([\w-]+)/g)) {
     const sub = m[1]!;
     if (!sub.startsWith('-')) suggested.add(sub);
   }

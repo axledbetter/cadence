@@ -69,21 +69,23 @@ describe('library export surface (v7.3.0)', () => {
     assert.match(dot.default, /^\.\/dist\//, 'default points at dist/');
     // Exports map intentionally does NOT expose ./cli/*, ./core/*, etc.
     // Consumers who need internals can deep-import via a deliberate
-    // unsupported path. Public subpath exports as of v7.11.0:
+    // unsupported path. Public subpath exports as of v8.0.0:
     //   - ./run-state/sameness-detector (added v7.10.0)
     //   - ./concurrent-dispatch (added v7.11.0)
+    //   - ./bin/cadence.js (added v8.0.0 — primary bin under new package name)
     const supportedKeys = Object.keys(pkg.exports).sort();
     assert.deepEqual(
       supportedKeys,
       [
         '.',
+        './bin/cadence.js',
         './bin/claude-autopilot.js',
         './bin/guardrail.js',
         './concurrent-dispatch',
         './package.json',
         './run-state/sameness-detector',
       ].sort(),
-      'export map shape is the locked v7.11.0 set',
+      'export map shape is the locked v8.0.0 set',
     );
     // Verify the sameness-detector subpath points at compiled output.
     const sd = pkg.exports['./run-state/sameness-detector'];

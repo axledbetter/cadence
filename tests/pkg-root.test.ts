@@ -10,7 +10,7 @@ import { findPackageRoot, resolveSiblingModule } from '../src/cli/_pkg-root.ts';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 describe('findPackageRoot', () => {
-  it('finds the @delegance/claude-autopilot package root from the source caller', () => {
+  it('finds the @delegance/cadence package root from the source caller', () => {
     const root = findPackageRoot(import.meta.url);
     // The test itself lives at <root>/tests/pkg-root.test.ts
     assert.equal(root, ROOT);

@@ -111,7 +111,7 @@ export function resolveTsx(opts: ResolveOpts): TsxResolution {
 
 function tryProjectLocal(projectRoot: string): TsxResolution | null {
   // Only classify as "project-local" if the CONSUMER explicitly declared
-  // `tsx` in their package.json. npm hoists @delegance/claude-autopilot's
+  // `tsx` in their package.json. npm hoists @delegance/cadence's
   // own tsx dep to the consumer root `node_modules/tsx`, so a bare
   // `require.resolve('tsx/package.json')` from the consumer root would
   // succeed even when the consumer never declared tsx themselves. Without
@@ -387,13 +387,13 @@ function resolveFromSource(
 
 const TSX_DEPRECATION_MESSAGE =
   '\n' +
-  '[deprecation] @delegance/claude-autopilot is using its bundled `tsx` to run\n' +
-  '              your TypeScript scripts. In v8.0.0, `tsx` will be removed from\n' +
-  '              runtime deps and you will need to install it yourself:\n' +
+  '[deprecation] @delegance/cadence is using its bundled `tsx` to run\n' +
+  '              your TypeScript scripts. In a future major, `tsx` will be removed\n' +
+  '              from runtime deps and you will need to install it yourself:\n' +
   '\n' +
   '                  npm install -D tsx\n' +
   '\n' +
-  '              To silence this warning now and prepare for v8.0.0:\n' +
+  '              To silence this warning now and prepare for the next major:\n' +
   '                1. Add `tsx` to your project devDependencies, OR\n' +
   '                2. Set `CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1` in your env.\n' +
   '\n' +

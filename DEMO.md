@@ -1,6 +1,8 @@
-# claude-autopilot end-to-end demo
+# Cadence (formerly claude-autopilot) end-to-end demo
 
-> **Note:** This demo was captured during the v5.4 and v5.6 release cycles (PRs #59-77). The pipeline architecture documented here, including the spec → plan → implement → validate → review → bugbot flow, is the same one running in v7.10.1 today. The specific phase numbers (v5.6 Phase 1, Phase 2, etc.) reference work that has since been generalized and merged into the unified autopilot skill. The cost and time numbers (12 min / $2.20 per task, 8-15 min per phase, $2-3/PR) remain representative of current-version runs on similar-sized changes. For a current-version run reference, see any v7.x release PR in the repo, all of which were shipped through the pipeline itself.
+> **Brand note (v8.0.0):** This product was renamed from `@delegance/claude-autopilot` to `@delegance/cadence` in v8.0.0. All historical run captures below use the old CLI name (`claude-autopilot ...`). Those invocations still work as bin aliases through v8.x — but if you're reproducing them today, prefer `cadence ...`.
+>
+> **Note:** This demo was captured during the v5.4 and v5.6 release cycles (PRs #59-77). The pipeline architecture documented here, including the spec → plan → implement → validate → review → bugbot flow, is the same one running in v8.x today. The specific phase numbers (v5.6 Phase 1, Phase 2, etc.) reference work that has since been generalized and merged into the unified autopilot skill. The cost and time numbers (12 min / $2.20 per task, 8-15 min per phase, $2-3/PR) remain representative of current-version runs on similar-sized changes. For a current-version run reference, see any v7.x release PR in the repo, all of which were shipped through the pipeline itself.
 
 ## TL;DR
 

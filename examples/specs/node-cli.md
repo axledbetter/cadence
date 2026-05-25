@@ -9,7 +9,7 @@ result to stdout. Demonstrates the v7.1.6 benchmark layout: a thin
 `tsconfig.json` set up for `allowJs + checkJs + noEmit` typechecking.
 
 This is the simplest scaffold target — it lights up the Node ESM path
-in `claude-autopilot scaffold --from-spec`.
+in `cadence scaffold --from-spec`.
 
 ## Files
 
@@ -25,8 +25,8 @@ in `claude-autopilot scaffold --from-spec`.
 ## How to use
 
 ```bash
-claude-autopilot examples node > spec.md
-claude-autopilot scaffold --from-spec spec.md
+cadence examples node > spec.md
+cadence scaffold --from-spec spec.md
 npm test
 ```
 

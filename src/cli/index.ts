@@ -46,18 +46,18 @@ function formatTopLevelError(err: unknown): { message: string; exit: number } {
   if (err instanceof GuardrailError) {
     const provider = err.provider ? ` [${err.provider}]` : '';
     const hint = err.code === 'auth'
-      ? '\n  hint: check your API key (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY) or run: claude-autopilot doctor'
+      ? '\n  hint: check your API key (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY) or run: cadence doctor'
       : err.code === 'rate_limit'
         ? '\n  hint: rate-limited by provider — retry shortly or switch model in guardrail.config.yaml'
         : err.code === 'invalid_config'
-          ? '\n  hint: check guardrail.config.yaml — claude-autopilot doctor'
+          ? '\n  hint: check guardrail.config.yaml — cadence doctor'
           : '';
-    return { message: `[claude-autopilot]${provider} ${err.code}: ${err.message}${hint}`, exit: 1 };
+    return { message: `[cadence]${provider} ${err.code}: ${err.message}${hint}`, exit: 1 };
   }
   if (err instanceof Error) {
-    return { message: `[claude-autopilot] ${err.message}`, exit: 1 };
+    return { message: `[cadence] ${err.message}`, exit: 1 };
   }
-  return { message: `[claude-autopilot] ${String(err)}`, exit: 1 };
+  return { message: `[cadence] ${String(err)}`, exit: 1 };
 }
 
 process.on('unhandledRejection', err => {
@@ -244,30 +244,34 @@ if (args.length === 0) {
     ? '\x1b[32m✓\x1b[0m  LLM API key detected'
     : '\x1b[33m!\x1b[0m  No LLM API key found — set one of:\n     ANTHROPIC_API_KEY  https://console.anthropic.com/\n     OPENAI_API_KEY     https://platform.openai.com/api-keys\n     GEMINI_API_KEY     https://aistudio.google.com/app/apikey\n     GROQ_API_KEY       https://console.groq.com/keys  (fast free tier)';
   console.log(`
-\x1b[1m@delegance/claude-autopilot\x1b[0m — Autonomous dev pipeline for Claude Code
+\x1b[1mCadence\x1b[0m (\x1b[2m@delegance/cadence — formerly @delegance/claude-autopilot\x1b[0m) — Autonomous dev pipeline for Claude Code
       \x1b[2m(brainstorm → spec → plan → implement → migrate → validate → PR → review)\x1b[0m
 
   ${keyLine}
 
 \x1b[1mQuick start — full pipeline:\x1b[0m
 
-  \x1b[36mclaude-autopilot brainstorm "add SSO for enterprise tenants"\x1b[0m
+  \x1b[36mcadence brainstorm "add SSO for enterprise tenants"\x1b[0m
       Turn an idea into a reviewed spec, then auto-implement end-to-end.
 
 \x1b[1mOr just the review phase (v4 compatible):\x1b[0m
 
-  \x1b[36mclaude-autopilot run --base main\x1b[0m             Review files changed vs main
-  \x1b[36mclaude-autopilot scan src/auth/\x1b[0m              Scan any path (no git required)
-  \x1b[36mclaude-autopilot scan --ask "SQL injection?" src/db/\x1b[0m
-  \x1b[36mclaude-autopilot fix\x1b[0m                         Auto-fix cached findings
-  \x1b[36mclaude-autopilot migrate-v4\x1b[0m                  Codemod: migrate v4 config / CI / hooks
+  \x1b[36mcadence run --base main\x1b[0m             Review files changed vs main
+  \x1b[36mcadence scan src/auth/\x1b[0m              Scan any path (no git required)
+  \x1b[36mcadence scan --ask "SQL injection?" src/db/\x1b[0m
+  \x1b[36mcadence fix\x1b[0m                         Auto-fix cached findings
+  \x1b[36mcadence migrate-v4\x1b[0m                  Codemod: migrate v4 config / CI / hooks
 
 \x1b[1mSetup:\x1b[0m
 
-  \x1b[36mclaude-autopilot setup\x1b[0m                       Auto-detect stack, write config, install hook
-  \x1b[36mclaude-autopilot doctor\x1b[0m                      Check prerequisites
+  \x1b[36mcadence setup\x1b[0m                       Auto-detect stack, write config, install hook
+  \x1b[36mcadence doctor\x1b[0m                      Check prerequisites
 
-Run \x1b[36mclaude-autopilot --help\x1b[0m for full command reference.
+Run \x1b[36mcadence --help\x1b[0m for full command reference.
+
+\x1b[2m(The legacy \`claude-autopilot\` and \`guardrail\` CLIs still work as
+aliases for the entire v8.x line. To migrate from the old npm package:
+  npm uninstall -g @delegance/claude-autopilot && npm install -g @delegance/cadence)\x1b[0m
 `);
   process.exit(0);
 }

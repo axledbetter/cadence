@@ -20,7 +20,7 @@ Pick the entry point ONCE at the start:
 The pipeline ABORTS with a clear actionable error if any of these are missing:
 
 - **Required skills:** `superpowers:brainstorming`, `superpowers:writing-plans`, `superpowers:subagent-driven-development`, `superpowers:using-git-worktrees` (for Step 2)
-- **Required project scripts:** `scripts/codex-review.ts`, `scripts/codex-pr-review.ts`, `scripts/bugbot.ts`, `scripts/validate.ts` — OR equivalent CLI verbs from `@delegance/claude-autopilot` if running the package version
+- **Required project scripts:** `scripts/codex-review.ts`, `scripts/codex-pr-review.ts`, `scripts/bugbot.ts`, `scripts/validate.ts` — OR equivalent CLI verbs from `@delegance/cadence` (formerly `@delegance/claude-autopilot`) if running the package version
 - **Required env:** `OPENAI_API_KEY` (for Codex passes), `GITHUB_TOKEN` or `gh auth status` (for PR creation), `ANTHROPIC_API_KEY` (for impl agents)
 
 If any superpowers skill is missing, print:
@@ -42,9 +42,10 @@ Each numbered check below is a HARD GATE. ALL must pass before any LLM call. The
    Then verify push permission for the target repo: `gh repo view <owner>/<repo>` succeeds AND either (a) `gh api repos/<owner>/<repo>/collaborators/<user>/permission` returns `admin`/`maintain`/`write`, or (b) a no-op `git push --dry-run origin HEAD:refs/heads/<probe-branch>` succeeds. Abort if no push permission.
 4. **Codex CLI resolution** — Resolve the codex-review command ONCE here and cache the resolved invocation for the rest of the pipeline. Try in order:
    - `npx tsx scripts/codex-review.ts --help` (project-local script), OR
-   - `npx @delegance/claude-autopilot codex-review --help` (package CLI, also exposes `codex-pr-review`, `bugbot`, `validate`).
+   - `npx @delegance/cadence codex-review --help` (package CLI, also exposes `codex-pr-review`, `bugbot`, `validate`), OR
+   - `npx @delegance/claude-autopilot codex-review --help` (legacy package name, deprecated since v8.0.0 but still installable).
 
-   Use whichever resolves first; cache the resolved command. Abort if neither does. The accepted package CLI verbs are: `codex-review`, `codex-pr-review`, `bugbot`, `validate` — pinned to the major version of `@delegance/claude-autopilot` declared in the host project's `package.json`.
+   Use whichever resolves first; cache the resolved command. Abort if neither does. The accepted package CLI verbs are: `codex-review`, `codex-pr-review`, `bugbot`, `validate` — pinned to the major version of `@delegance/cadence` (or legacy `@delegance/claude-autopilot`) declared in the host project's `package.json`.
 5. **Test runner reachable** — Detect from `package.json`: if `scripts.test` is defined, run `npm run test -- --help` or framework-specific probe (`vitest --version`, `jest --help`, `playwright --version`). Do NOT assume `--dry-run` is supported. If no `test` script exists, accept presence of `scripts/validate.ts` or `scripts.validate` instead. Abort only if neither test nor validation entrypoint is reachable.
 6. **Implementation-agent credentials present** — `ANTHROPIC_API_KEY` is required because the skill drives Claude Code subagents for implementation; this is independent of which provider the host project uses for application LLM calls. If your impl-agent backend is intentionally non-Anthropic, document the override in `.claude/autopilot.config.json` and the preflight will accept the configured alternative.
 7. **Migration tool reachable** (if `data/deltas/` exists) — `/migrate` skill or `supabase` CLI
@@ -434,7 +435,7 @@ As of v7.10.0, the three retry loops (Step 4 validate, Step 7 Codex PR review, S
 import {
   computeFingerprint,
   shouldEscalate,
-} from '@delegance/claude-autopilot/run-state/sameness-detector';
+} from '@delegance/cadence/run-state/sameness-detector';
 
 // Or from a local checkout:
 import { computeFingerprint, shouldEscalate } from './src/core/run-state/sameness-detector.ts';
