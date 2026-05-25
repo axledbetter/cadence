@@ -163,7 +163,7 @@ export async function runDoctor(): Promise<DoctorResult> {
     name: 'tsx available',
     result: tsxVersion ? 'pass' : 'fail',
     message: !tsxVersion
-      ? 'tsx not found — reinstall: npm install -g @delegance/claude-autopilot@latest'
+      ? 'tsx not found — reinstall: npm install -g @delegance/cadence@latest'
       : undefined,
   });
 

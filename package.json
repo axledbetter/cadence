@@ -1,12 +1,13 @@
 {
-  "name": "@delegance/claude-autopilot",
-  "version": "7.11.1",
+  "name": "@delegance/cadence",
+  "version": "8.0.0",
   "type": "module",
   "publishConfig": {
     "tag": "latest"
   },
-  "description": "Autonomous development pipeline for Claude Code: brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. Multi-model, local-first, every phase a skill you can intervene in.",
+  "description": "Cadence — autonomous development pipeline for Claude Code: brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. Multi-model, local-first, every phase a skill you can intervene in. (Formerly @delegance/claude-autopilot.)",
   "keywords": [
+    "cadence",
     "claude-autopilot",
     "autopilot",
     "claude-code",
@@ -34,12 +35,17 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/axledbetter/claude-autopilot.git"
+    "url": "https://github.com/axledbetter/cadence.git"
   },
+  "bugs": {
+    "url": "https://github.com/axledbetter/cadence/issues"
+  },
+  "homepage": "https://github.com/axledbetter/cadence#readme",
   "engines": {
     "node": ">=22.0.0"
   },
   "bin": {
+    "cadence": "bin/cadence.js",
     "claude-autopilot": "bin/claude-autopilot.js",
     "guardrail": "bin/guardrail.js"
   },
@@ -57,6 +63,7 @@
       "types": "./dist/src/core/concurrent-dispatch/index.d.ts",
       "default": "./dist/src/core/concurrent-dispatch/index.js"
     },
+    "./bin/cadence.js": "./bin/cadence.js",
     "./bin/claude-autopilot.js": "./bin/claude-autopilot.js",
     "./bin/guardrail.js": "./bin/guardrail.js",
     "./package.json": "./package.json"

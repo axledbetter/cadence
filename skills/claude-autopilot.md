@@ -32,7 +32,7 @@ Each phase writes its output to disk. Claude can stop, the user can edit the art
 | **Branch** | git worktree at `.claude/worktrees/<slug>` or branch on HEAD | Invokes `using-git-worktrees` or cuts branch directly | When branch exists |
 | **Implement** | Git commits on the branch | Invokes `subagent-driven-development`, one subagent per plan phase | When all plan phases have landing commits |
 | **Migrate** | SQL deltas applied | Invokes `migrate` skill if DB migrations exist in the branch; skips otherwise | When all environments (dev → QA → prod) are in sync |
-| **Validate** | `.claude/validation-report.json` | Runs static rules + tests + typecheck + LLM review via `claude-autopilot run` | When validation passes or after 3 failed retries |
+| **Validate** | `.claude/validation-report.json` | Runs static rules + tests + typecheck + LLM review via `cadence run` (or legacy `claude-autopilot run`) | When validation passes or after 3 failed retries |
 | **PR** | GitHub PR number | Invokes `commit-push-pr` or runs `gh pr create` directly | When PR is open |
 | **PR review** | PR comment | Invokes `review-2pass` or `codex-pr-review` against the PR | After one round unless criticals found |
 | **Triage** | Bugbot thread replies + follow-up commits | Invokes `bugbot` skill to triage reviewer findings | When all HIGH severity items are resolved or human-dismissed |
@@ -72,7 +72,7 @@ docs/
 
 ## Why this skill exists separately from CLI subcommands
 
-The CLI subcommands (`claude-autopilot run`, `claude-autopilot migrate`, etc.) are imperative — each does one thing. This skill is declarative — it describes the pipeline's *loop invariants* (phase order, artifact paths, recovery rules, when to pause). Claude reads this skill to decide *which* CLI subcommand to run *next*. Users who want to run one phase by hand use the CLI; users who want Claude to drive the whole pipeline invoke this skill.
+The CLI subcommands (`cadence run`, `cadence migrate`, etc. — or legacy `claude-autopilot run`/`claude-autopilot migrate`) are imperative — each does one thing. This skill is declarative — it describes the pipeline's *loop invariants* (phase order, artifact paths, recovery rules, when to pause). Claude reads this skill to decide *which* CLI subcommand to run *next*. Users who want to run one phase by hand use the CLI; users who want Claude to drive the whole pipeline invoke this skill.
 
 See also:
 - `skills/autopilot/SKILL.md` — detailed step-by-step runbook (deprecated alias for this file in v5; retained for back-compat)

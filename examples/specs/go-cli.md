@@ -21,8 +21,8 @@ add `cmd/<name>/main.go` paths to the spec instead of root `main.go`.
 ## How to use
 
 ```bash
-claude-autopilot examples go > spec.md
-claude-autopilot scaffold --from-spec spec.md
+cadence examples go > spec.md
+cadence scaffold --from-spec spec.md
 go test ./...
 go run . --name=World
 ```

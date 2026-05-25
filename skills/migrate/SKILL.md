@@ -20,10 +20,12 @@ This skill **does not know what your migration tool is**. It just executes the c
 ### CLI
 
 ```bash
-claude-autopilot migrate                  # default env: dev
-claude-autopilot migrate --env qa
-claude-autopilot migrate --env prod --yes # required for prod (manual approval)
-claude-autopilot migrate doctor           # validate stack.md without running
+cadence migrate                  # default env: dev
+cadence migrate --env qa
+cadence migrate --env prod --yes # required for prod (manual approval)
+cadence migrate doctor           # validate stack.md without running
+
+# Legacy `claude-autopilot migrate ...` continues to work as a bin alias.
 ```
 
 ### Autopilot pipeline
@@ -53,7 +55,7 @@ migrate:
     require_dry_run_first: false
 ```
 
-The `init` flow auto-detects most common toolchains and pre-fills sensible commands. Run `claude-autopilot init` once to bootstrap.
+The `init` flow auto-detects most common toolchains and pre-fills sensible commands. Run `cadence init` once to bootstrap.
 
 ## Examples by toolchain
 
@@ -221,7 +223,7 @@ The generic skill cannot enumerate `appliedMigrations` (that's tool-specific) �
 Every dispatch — success, failure, dry-run — writes one entry to `.autopilot/audit.log` (chained via `seq` + `prev_hash`). Inspect with:
 
 ```bash
-claude-autopilot migrate doctor --audit-tail 10
+cadence migrate doctor --audit-tail 10
 ```
 
 ## Stack.md schema

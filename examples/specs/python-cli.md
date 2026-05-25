@@ -25,8 +25,8 @@ library / CLI" specs. For HTTP services see `fastapi.md`.
 ## How to use
 
 ```bash
-claude-autopilot examples python > spec.md
-claude-autopilot scaffold --from-spec spec.md
+cadence examples python > spec.md
+cadence scaffold --from-spec spec.md
 python -m pip install -e .
 pytest
 ```

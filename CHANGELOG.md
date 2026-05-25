@@ -2,6 +2,92 @@
 
 - v5.6 Phase 7 (docs reconciliation) — pending.
 
+## 8.0.0 — 2026-05-20
+
+**Brand reset — `@delegance/claude-autopilot` is now `@delegance/cadence`,
+shipped as `cadence` on the CLI.** Per semver, the npm package name change
+is breaking, so this is a major bump. The product itself is identical;
+v8.0.0 is a rename and a re-introduction, not a feature release.
+
+### Migration
+
+```bash
+# Replace the old install with the new one
+npm uninstall -g @delegance/claude-autopilot
+npm install -g @delegance/cadence
+
+# Prefer the new bin name everywhere
+cadence brainstorm "..."        # was: claude-autopilot brainstorm "..."
+cadence run --base main         # was: claude-autopilot run --base main
+```
+
+The legacy `claude-autopilot` and `guardrail` CLI binaries continue to
+work as aliases for the entire `v8.x` line. Scripts and CI pipelines that
+invoke `claude-autopilot` keep working without changes. Migrate at your
+own pace; we will drop the legacy bin no sooner than `v9.0.0`.
+
+### What changed
+
+- **npm package renamed.** `@delegance/claude-autopilot` → `@delegance/cadence`.
+  The old package is `npm deprecate`d (not unpublished) with a redirect
+  message. All published `7.x.x` versions remain installable forever under
+  the old name.
+- **Primary CLI binary renamed.** `cadence` is the canonical bin; the
+  package's `bin` map still lists `claude-autopilot` and `guardrail` as
+  aliases (functionally identical entrypoints).
+- **GitHub repo renamed.** `axledbetter/claude-autopilot` →
+  `axledbetter/cadence`. GitHub auto-redirects all old URLs (PRs, issues,
+  raw files, clones via HTTPS/SSH) permanently. Update your local
+  remotes with `git remote set-url origin https://github.com/axledbetter/cadence.git`
+  at your convenience.
+- **Welcome banner + error prefixes rebranded.** The CLI now identifies
+  itself as `Cadence` (with the legacy name in parentheses for migration
+  discoverability). Top-level error messages use `[cadence]` instead of
+  `[claude-autopilot]`. The `[guardrail]` legacy prefix continues to be
+  banned by `tests/no-legacy-prefix.test.ts`.
+- **`@delegance/cadence/run-state/sameness-detector` subpath export
+  added.** The legacy `@delegance/claude-autopilot/run-state/sameness-detector`
+  path is unreachable from the new package (the old npm name is deprecated)
+  but the same module is exposed at the cadence subpath with no API
+  changes.
+- **Package-root resolver accepts either name.** `findPackageRoot` (used
+  by `init`, `migrate-v4`, preset config lookup) walks up looking for a
+  `package.json` declaring `@delegance/cadence` OR the legacy
+  `@delegance/claude-autopilot`. Existing v7.x consumer trees keep
+  working under the helper.
+- **Guardrail tombstone (`@delegance/guardrail`) probe order updated.**
+  When forwarding `guardrail` invocations, the tombstone now tries
+  `@delegance/cadence` first and falls back to `@delegance/claude-autopilot`,
+  so the v5-era guardrail wrapper transparently picks up the new package.
+  No re-publish of the tombstone is required for the v8 ship; future
+  tombstone releases will pick up the change automatically.
+
+### What did NOT change
+
+- **All env-var names keep the `CLAUDE_AUTOPILOT_` prefix**
+  (`CLAUDE_AUTOPILOT_DEPRECATION`, `CLAUDE_AUTOPILOT_TSX`,
+  `CLAUDE_AUTOPILOT_STATE_DIR`, `CLAUDE_AUTOPILOT_DEBUG`,
+  `CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION`). Renaming them would force
+  another breaking change on operators and their CI for zero functional
+  payoff. Cadence's `--help` documents them by these existing names.
+- **All public skill names** (`brainstorm`, `validate`, `migrate`,
+  `bugbot`, `codex-pr-review`, `autopilot`, etc.) are unchanged. Your
+  existing `.claude/skills/` overrides keep working.
+- **The state directory (`~/.claude-autopilot/`)** is unchanged. No
+  migration of cached runs, deprecation stamps, or per-day dedup files
+  is required.
+- **The library API exported from `src/index.ts`** is unchanged. Code
+  that imports `@delegance/cadence` gets the same `runScan`,
+  `runValidate`, `detectProject`, etc. signatures it got from the old
+  package.
+
+### Risk + review
+
+- Risk: **high** — package rename, GitHub repo rename, npm deprecation
+  of the old name. Three sequential Codex passes per the merged
+  risk-tiered autopilot policy.
+- All 1,941 tests from `v7.11.1` continue to pass.
+
 ## 7.11.1 — 2026-05-25
 
 ### Added

@@ -6,26 +6,29 @@
  * Background: every site that hardcoded `path.resolve(dirname(fileURLToPath(...)), '..', '..')`
  * worked when called from the source layout but resolved one level shallow under
  * the compiled output (landing in `dist/` instead of the package root). The
- * real-world soak against `npx @delegance/claude-autopilot@alpha init` surfaced
+ * real-world soak against `npx @delegance/cadence init` surfaced
  * this — `init` couldn't find `presets/<name>/guardrail.config.yaml` because it
  * was looking at `dist/presets/...` (which doesn't exist; presets ship at the
  * package root).
  *
  * This helper walks up from the caller's `import.meta.url` looking for the
- * `@delegance/claude-autopilot` package.json. Both source and compiled callers
- * land in the same place.
+ * `@delegance/cadence` package.json. Both source and compiled callers
+ * land in the same place. The legacy name `@delegance/claude-autopilot` is
+ * still recognized so v7.x consumer trees keep working during migration.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PACKAGE_NAME = '@delegance/claude-autopilot';
+const PACKAGE_NAME = '@delegance/cadence';
+const LEGACY_PACKAGE_NAME = '@delegance/claude-autopilot';
 
 /**
  * Walks up from the caller's location looking for the package.json that
- * declares `name === '@delegance/claude-autopilot'`. Returns the directory
- * containing that package.json, or null if not found within `maxDepth` levels.
+ * declares `name === '@delegance/cadence'` (or the legacy
+ * `@delegance/claude-autopilot` name). Returns the directory containing that
+ * package.json, or null if not found within `maxDepth` levels.
  */
 export function findPackageRoot(callerImportMetaUrl: string, maxDepth = 10): string | null {
   let dir = path.dirname(fileURLToPath(callerImportMetaUrl));
@@ -34,7 +37,7 @@ export function findPackageRoot(callerImportMetaUrl: string, maxDepth = 10): str
     if (fs.existsSync(candidate)) {
       try {
         const pkg = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { name?: string };
-        if (pkg.name === PACKAGE_NAME) return dir;
+        if (pkg.name === PACKAGE_NAME || pkg.name === LEGACY_PACKAGE_NAME) return dir;
       } catch {
         /* keep walking */
       }
@@ -54,8 +57,8 @@ export function requirePackageRoot(callerImportMetaUrl: string): string {
   const root = findPackageRoot(callerImportMetaUrl);
   if (!root) {
     throw new Error(
-      `[claude-autopilot] Could not locate package root from ${fileURLToPath(callerImportMetaUrl)}. ` +
-      `Reinstall: npm install -g @delegance/claude-autopilot@alpha`,
+      `[cadence] Could not locate package root from ${fileURLToPath(callerImportMetaUrl)}. ` +
+      `Reinstall: npm install -g @delegance/cadence`,
     );
   }
   return root;

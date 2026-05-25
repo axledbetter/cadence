@@ -59,10 +59,13 @@ describe('sameness-detector / SKILL.md integration', () => {
   });
 
   it('SKILL.md documents the new public subpath import', () => {
+    // v8.0.0 — package renamed to @delegance/cadence. The SKILL.md import
+    // path was updated accordingly. Accept either name during the deprecation
+    // window so out-of-tree forks don't break.
     assert.match(
       skillBody,
-      /@delegance\/claude-autopilot\/run-state\/sameness-detector/,
-      'SKILL.md must document the public subpath import',
+      /@delegance\/(cadence|claude-autopilot)\/run-state\/sameness-detector/,
+      'SKILL.md must document the public subpath import (cadence or legacy claude-autopilot)',
     );
   });
 });

@@ -1,11 +1,11 @@
 ---
 name: guardrail
-description: (Legacy alias) LLM-powered code review — runs static rules + LLM review over git-changed files. As of v5, this is the review *phase* of claude-autopilot. Invoke via `claude-autopilot run` or the full pipeline via `claude-autopilot` skill.
+description: (Legacy alias) LLM-powered code review — runs static rules + LLM review over git-changed files. As of v5, this is the review *phase* of Cadence (formerly claude-autopilot). Invoke via `cadence run` (or legacy `claude-autopilot run`) or the full pipeline via the `claude-autopilot` skill.
 ---
 
 # guardrail — review phase (legacy alias)
 
-As of `@delegance/claude-autopilot@5.0.0`, `guardrail` is the review phase of the full pipeline, not a standalone product. This skill is preserved as a back-compat alias for Claude Code agents that were configured against v4.x.
+As of `@delegance/claude-autopilot@5.0.0`, `guardrail` is the review phase of the full pipeline, not a standalone product. **Update for v8.0.0:** the package was further renamed to `@delegance/cadence` and the primary CLI bin is now `cadence`; `guardrail` and `claude-autopilot` remain as bin aliases through the v8.x line. This skill is preserved as a back-compat alias for Claude Code agents that were configured against v4.x.
 
 **For new configurations**, invoke `skills/claude-autopilot.md` to drive the full pipeline, or use the flat review subcommands (`run`, `scan`, `ci`, etc.) for just the review phase. Grouped syntax (`claude-autopilot review <verb>`) lands in alpha.2.
 

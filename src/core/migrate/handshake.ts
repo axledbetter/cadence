@@ -144,7 +144,7 @@ export function performHandshake(opts: HandshakeOptions): HandshakeResult {
   if (!range.ok) {
     const reason = range.reason;
     const hint = reason === 'runtime-below-min'
-      ? `requires runtime >= ${parsed.min_runtime}, got ${opts.runtimeVersion} -- run \`npm install -g @delegance/claude-autopilot@latest\``
+      ? `requires runtime >= ${parsed.min_runtime}, got ${opts.runtimeVersion} -- run \`npm install -g @delegance/cadence@latest\``
       : `requires runtime <= ${parsed.max_runtime}, got ${opts.runtimeVersion} -- pin an older runtime or upgrade the skill`;
     return {
       ok: false,

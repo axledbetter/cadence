@@ -22,46 +22,63 @@ import * as fs from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEPRECATION_NOTICE =
-  '\x1b[33m[deprecated]\x1b[0m @delegance/guardrail renamed to @delegance/claude-autopilot. ' +
+  '\x1b[33m[deprecated]\x1b[0m @delegance/guardrail was renamed to @delegance/cadence ' +
+  '(formerly @delegance/claude-autopilot — also deprecated as of v8.0.0). ' +
   'This package is a thin forwarding wrapper — identical behavior. ' +
-  'Migrate: npm install @delegance/claude-autopilot@alpha && npx @delegance/claude-autopilot migrate-v4 --write\n' +
+  'Migrate: npm install @delegance/cadence && npx cadence migrate-v4 --write\n' +
   'Silence: set CLAUDE_AUTOPILOT_DEPRECATION=never\n';
 
 function resolveClaudeAutopilotBin() {
   const req = createRequire(import.meta.url);
 
+  // v8.0.0 — the package was renamed @delegance/claude-autopilot →
+  // @delegance/cadence. Try the new name first, fall back to the legacy
+  // name so users on older installs keep working.
+  const PKG_CANDIDATES = ['@delegance/cadence', '@delegance/claude-autopilot'];
+  const BIN_NAMES = ['cadence.js', 'claude-autopilot.js'];
+
   // Strategy 1: resolve the entrypoint directly. Works when the main package
-  // declares `./bin/claude-autopilot.js` in its `exports` field. (As of v5.0.0-alpha.3+,
-  // it does.) Skipped silently under older versions that lack the export.
-  try {
-    return req.resolve('@delegance/claude-autopilot/bin/claude-autopilot.js');
-  } catch {
-    /* fall through */
+  // declares `./bin/<name>.js` in its `exports` field. (cadence ships
+  // both ./bin/cadence.js and ./bin/claude-autopilot.js as of v8.0.0.)
+  for (const pkg of PKG_CANDIDATES) {
+    for (const bin of BIN_NAMES) {
+      try {
+        return req.resolve(`${pkg}/bin/${bin}`);
+      } catch { /* fall through */ }
+    }
   }
 
-  // Strategy 2: resolve the main package's package.json (always exposed by
+  // Strategy 2: resolve each candidate's package.json (always exposed by
   // node's resolver even when `exports` is restrictive) and derive the bin
   // path from it. Works under npm, pnpm, yarn classic hoisted, yarn PnP,
   // Deno's npm compat layer.
-  try {
-    const pkgJson = req.resolve('@delegance/claude-autopilot/package.json');
-    const pkgDir = path.dirname(pkgJson);
-    const candidate = path.join(pkgDir, 'bin', 'claude-autopilot.js');
-    if (fs.existsSync(candidate)) return candidate;
-  } catch {
-    /* fall through */
+  for (const pkg of PKG_CANDIDATES) {
+    try {
+      const pkgJson = req.resolve(`${pkg}/package.json`);
+      const pkgDir = path.dirname(pkgJson);
+      for (const bin of BIN_NAMES) {
+        const candidate = path.join(pkgDir, 'bin', bin);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    } catch { /* fall through */ }
   }
 
   // Strategy 3: relative probe of sibling node_modules layouts (when the
   // tombstone is installed globally next to the real package without either
-  // being resolvable via the module graph).
-  const candidates = [
-    path.resolve(__dirname, '..', 'node_modules', '@delegance', 'claude-autopilot', 'bin', 'claude-autopilot.js'),
-    path.resolve(__dirname, '..', '..', '@delegance', 'claude-autopilot', 'bin', 'claude-autopilot.js'),
-    path.resolve(__dirname, '..', '..', '..', '@delegance', 'claude-autopilot', 'bin', 'claude-autopilot.js'),
+  // being resolvable via the module graph). Probe both legacy and new
+  // package names + both bin names.
+  const probeRoots = [
+    path.resolve(__dirname, '..', 'node_modules'),
+    path.resolve(__dirname, '..', '..'),
+    path.resolve(__dirname, '..', '..', '..'),
   ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+  for (const root of probeRoots) {
+    for (const pkgPath of ['@delegance/cadence', '@delegance/claude-autopilot']) {
+      for (const bin of BIN_NAMES) {
+        const candidate = path.join(root, pkgPath, 'bin', bin);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
   }
 
   // Strategy 4: PATH lookup of the co-installed bin.
@@ -79,15 +96,18 @@ if (resolved) {
   // Windows and under npm/yarn wrappers. process.execPath is the current node.
   result = spawnSync(process.execPath, [resolved, ...process.argv.slice(2)], { stdio: 'inherit' });
 } else {
-  // Last resort: shell out to `claude-autopilot` on PATH.
-  result = spawnSync('claude-autopilot', process.argv.slice(2), { stdio: 'inherit' });
+  // Last resort: shell out to `cadence` (preferred) then `claude-autopilot` on PATH.
+  result = spawnSync('cadence', process.argv.slice(2), { stdio: 'inherit' });
+  if (result.error && result.error.code === 'ENOENT') {
+    result = spawnSync('claude-autopilot', process.argv.slice(2), { stdio: 'inherit' });
+  }
 }
 
 if (result.error) {
   if (result.error.code === 'ENOENT') {
     process.stderr.write(
-      '[guardrail] @delegance/claude-autopilot not found. Install it:\n' +
-      '  npm install -g @delegance/claude-autopilot@alpha\n' +
+      '[guardrail] @delegance/cadence not found. Install it:\n' +
+      '  npm install -g @delegance/cadence\n' +
       'Or add it as a sibling dep of @delegance/guardrail in your project.\n',
     );
     process.exit(127);

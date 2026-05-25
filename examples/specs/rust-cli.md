@@ -23,8 +23,8 @@ documented convention.
 ## How to use
 
 ```bash
-claude-autopilot examples rust > spec.md
-claude-autopilot scaffold --from-spec spec.md
+cadence examples rust > spec.md
+cadence scaffold --from-spec spec.md
 cargo test
 cargo run -- --name=World
 ```

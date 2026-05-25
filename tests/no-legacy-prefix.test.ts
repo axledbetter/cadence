@@ -38,7 +38,7 @@ function walk(dir: string, acc: string[] = []): string[] {
 }
 
 describe('error prefix hygiene', () => {
-  it('src/cli/** uses [claude-autopilot] prefix, not legacy [guardrail]', () => {
+  it('src/cli/** uses [cadence] or [claude-autopilot] prefix, not legacy [guardrail]', () => {
     const files = walk(CLI_DIR);
     const offenders: Array<{ file: string; line: number; text: string }> = [];
     for (const file of files) {
@@ -55,7 +55,7 @@ describe('error prefix hygiene', () => {
       const report = offenders.map(o => `  ${o.file}:${o.line}  ${o.text}`).join('\n');
       assert.fail(
         `Found ${offenders.length} [guardrail] prefix(es) in src/cli/. ` +
-        `Replace with [claude-autopilot] or the phase name (e.g. [run], [doctor]).\n${report}\n\n` +
+        `Replace with [cadence] (preferred) / [claude-autopilot] or the phase name (e.g. [run], [doctor]).\n${report}\n\n` +
         `If a match is legitimate (e.g. discussing the legacy bin by name), add the file to ALLOWED_FILES in this test.`,
       );
     }

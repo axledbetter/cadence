@@ -15,11 +15,11 @@ import * as path from 'node:path';
 import { findPackageRoot, requirePackageRoot } from '../../src/cli/_pkg-root.ts';
 
 describe('findPackageRoot (consumed from src/core/migrate)', () => {
-  it('locates the package root containing @delegance/claude-autopilot', () => {
+  it('locates the package root containing @delegance/cadence', () => {
     const root = findPackageRoot(import.meta.url);
     assert.ok(root, 'findPackageRoot should return a non-null path');
     const pkg = JSON.parse(fs.readFileSync(path.join(root!, 'package.json'), 'utf8')) as { name?: string };
-    assert.equal(pkg.name, '@delegance/claude-autopilot');
+    assert.equal(pkg.name, '@delegance/cadence');
   });
 
   it('returns the same root when called repeatedly', () => {

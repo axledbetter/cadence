@@ -1,10 +1,18 @@
-# @delegance/claude-autopilot
+# Cadence (`@delegance/cadence`)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![GitHub](https://img.shields.io/badge/GitHub-axledbetter%2Fclaude--autopilot-181717?logo=github)](https://github.com/axledbetter/claude-autopilot) [![npm](https://img.shields.io/npm/v/@delegance/claude-autopilot.svg)](https://www.npmjs.com/package/@delegance/claude-autopilot)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![GitHub](https://img.shields.io/badge/GitHub-axledbetter%2Fcadence-181717?logo=github)](https://github.com/axledbetter/cadence) [![npm](https://img.shields.io/npm/v/@delegance/cadence.svg)](https://www.npmjs.com/package/@delegance/cadence)
+
+> **Formerly known as `@delegance/claude-autopilot`.** As of v8.0.0 the package has been renamed to `@delegance/cadence` and the CLI binary is `cadence`. The old `claude-autopilot` (and `guardrail`) bins remain as aliases through the v8.x line. To migrate:
+>
+> ```bash
+> npm uninstall -g @delegance/claude-autopilot && npm install -g @delegance/cadence
+> ```
+>
+> The old npm package is deprecated but still installable; the GitHub repo at `axledbetter/claude-autopilot` redirects to `axledbetter/cadence`.
 
 **Autonomous development pipeline for Claude Code. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge — all from your terminal, on your codebase, with your test suite.**
 
-**Open source, MIT-licensed, runs on your machine with your API keys.** No hosted agent, no per-seat subscription — `npm install -g @delegance/claude-autopilot@latest` and you're done.
+**Open source, MIT-licensed, runs on your machine with your API keys.** No hosted agent, no per-seat subscription — `npm install -g @delegance/cadence@latest` and you're done.
 
 ## Hosted dashboard (early access)
 
@@ -13,7 +21,7 @@ A hosted dashboard for team-wide run history, cost roll-up, and member managemen
 If you're interested in early access, open an issue or email alex@delegance.com. Otherwise the rest of this README covers everything you need to run the CLI locally with your own API keys.
 
 ```bash
-claude-autopilot brainstorm "add SSO with SAML for enterprise tenants"
+cadence brainstorm "add SSO with SAML for enterprise tenants"
 # → writes spec (reviewed by Codex) → writes plan (reviewed by Codex) →
 # → creates branch → implements with subagents → runs migrations →
 # → runs full test + lint + type + security gate → opens PR →
@@ -36,7 +44,7 @@ On a Next.js fixture seeded with 13 production-realistic bugs covering the categ
 
 | Configuration | Bugs caught | Cost | Time |
 |---|---|---|---|
-| **`claude-autopilot scan --all` with Claude Opus** | **13 / 13** | $0.21 | 38 s |
+| **`cadence scan --all` with Claude Opus** | **13 / 13** | $0.21 | 38 s |
 
 Every finding came with a concrete remediation (often a code patch or named library — `Zod` for validation, atomic Postgres updates for TOCTOU, allowlist + DNS resolution for SSRF). [Reproduce the benchmark.](#reproducing-the-benchmark)
 
@@ -53,21 +61,21 @@ Every finding came with a concrete remediation (often a code patch or named libr
 | **Cursor BugBot / CodeRabbit** | Hosted | Per-PR or seat | Vendor's model | Review only | Post-hoc |
 | **Aider / Cline** | Local CLI | Free + your API key | User's choice | None | Continuous |
 | **OpenHands / SWE-agent** | Local research | Free | User's choice | Agent decides | Rare |
-| **claude-autopilot** | **Local CLI, your repo** | **Open source CLI + your model/API costs (Claude / Codex / Gemini / Groq / Ollama-local)** | **Multi-model per role (Claude + Codex + Gemini)** | **Skill-per-phase, rewireable** | **Every phase, all state on disk** |
+| **Cadence** (formerly claude-autopilot) | **Local CLI, your repo** | **Open source CLI + your model/API costs (Claude / Codex / Gemini / Groq / Ollama-local)** | **Multi-model per role (Claude + Codex + Gemini)** | **Skill-per-phase, rewireable** | **Every phase, all state on disk** |
 
 Four things only this product gives you:
 
 1. **No hosted workspace or remote sandbox.** Your repo stays on your machine. No third-party agent runtime, no SaaS-side orchestration, no per-seat markup. Model prompts (diffs, file context, design questions) are sent to whichever LLM providers you've configured (Anthropic / OpenAI / Google / Groq / Ollama-local). For a truly local-only setup, you must point _every_ model used by the entire execution path at a local endpoint: that includes the Claude Code agent runtime itself (configure a local Claude Code provider) AND the autopilot review adapter (`openai-compatible` pointed at Ollama). Pointing only the review adapter at Ollama still ships prompts/diffs to Anthropic via Claude Code. For most teams, local-only isn't the goal; "no hosted orchestration + your existing provider keys" is.
 2. **Risk-tiered review depth (policy-driven).** Specs declare `risk: low | medium | high` in frontmatter. The autopilot skill runs 1 / 2 / 3 sequential Codex passes accordingly, each with a remediation cycle in between. Enforcement is encoded in the skill (an LLM-driven instruction set, not a hard CLI gate) so it's auditable and editable: read `.claude/skills/autopilot/SKILL.md`, swap the tier rules for your codebase, expand the auto-escalation keyword list. Designed for teams that want review depth to scale with change risk instead of running forensic-grade review on every typo.
 3. **Ships as a Claude Code skill, not a competing IDE.** `/brainstorm`, `/autopilot`, `/migrate`, `/validate` are first-class Claude Code commands. As Claude Code grows, autopilot rides that adoption. You don't switch tools to use it; it's already there.
-4. **Multi-model council, available as a verb.** `claude-autopilot council` dispatches the same diff or design question to Claude + Codex + Gemini in parallel and synthesizes the consensus. Wire it into the autopilot pipeline by editing `.claude/skills/autopilot/SKILL.md` Step 7, or invoke standalone for one-off design decisions. The default pipeline uses sequential Codex review (cheaper, faster, often sufficient for routine changes); council is the higher-rigor option when you want broader model diversity.
+4. **Multi-model council, available as a verb.** `cadence council` dispatches the same diff or design question to Claude + Codex + Gemini in parallel and synthesizes the consensus. Wire it into the autopilot pipeline by editing `.claude/skills/autopilot/SKILL.md` Step 7, or invoke standalone for one-off design decisions. The default pipeline uses sequential Codex review (cheaper, faster, often sufficient for routine changes); council is the higher-rigor option when you want broader model diversity.
 
 Plus the four practical differences:
 
 - **Multi-model by role.** Claude writes code, Codex reviews the plan, bugbot triages PR findings. Swap any of them.
 - **Your stack, not a sandbox.** Runs your `npm test`, your `prisma migrate`, your `gh pr create`. If it works in your terminal, it works in the pipeline.
 - **Phase artifacts on disk, editable.** Every phase writes to a file you can open — `docs/specs/*.md`, `docs/plans/*.md`, a branch, a PR. Stop, edit by hand, resume, or re-run any phase in isolation.
-- **Test-gated auto-revert.** `claude-autopilot fix --verify` patches a file, runs your tests, reverts on failure. Built into the CLI, not a wrapper.
+- **Test-gated auto-revert.** `cadence fix --verify` patches a file, runs your tests, reverts on failure. Built into the CLI, not a wrapper.
 
 **Real numbers from a real run:** [DEMO.md](DEMO.md) — autonomous multi-file change on a Python codebase, **12 minutes, $2.20, zero manual intervention.**
 
@@ -75,19 +83,19 @@ Plus the four practical differences:
 
 ```bash
 # Install
-npm install -g @delegance/claude-autopilot
+npm install -g @delegance/cadence
 
 # One-shot setup — detects stack, writes config, installs skills, sets hooks
-claude-autopilot init
+cadence init
 
 # Ship a feature end-to-end
-claude-autopilot brainstorm "add rate limiting to the public API"
+cadence brainstorm "add rate limiting to the public API"
 # Answer ~5 questions. Spec written. Codex reviews it. You approve.
 # Claude walks the plan → implementation → migration → tests → PR → review.
 # ~15-40 min for a typical feature.
 
 # Or run just the review layer on an existing PR
-claude-autopilot run --pr 123
+cadence run --pr 123
 ```
 
 ## Run State Engine (v6)
@@ -104,11 +112,11 @@ budgets:
 ```
 
 ```bash
-claude-autopilot scan --all                  # any command — engine writes a per-run dir
-claude-autopilot runs list                   # newest-first, with status / cost / lastPhase
-claude-autopilot runs show 01HZK7P3D8Q9V…    # state snapshot + optional event tail
-claude-autopilot run resume 01HZK7P3D8Q9V…   # lookup-only today; live execution in a later v6.x
-claude-autopilot runs gc --older-than-days 7 # retire completed runs
+cadence scan --all                  # any command — engine writes a per-run dir
+cadence runs list                   # newest-first, with status / cost / lastPhase
+cadence runs show 01HZK7P3D8Q9V…    # state snapshot + optional event tail
+cadence run resume 01HZK7P3D8Q9V…   # lookup-only today; live execution in a later v8.x
+cadence runs gc --older-than-days 7 # retire completed runs
 ```
 
 Every state transition appends a typed event to `.guardrail-cache/runs/<ulid>/events.ndjson`; every CLI verb supports `--json` with strict stdout-envelope / stderr-NDJSON channel discipline. Side-effect phase replay consults persisted `externalRefs` plus a live provider read-back so resume is safe by construction.
@@ -134,11 +142,11 @@ Each phase is a Claude Code skill (`.claude/skills/<name>/SKILL.md`). You can in
 | **PR** | `commit-push-pr` | Opens the PR with auto-generated title, summary, and test plan | Claude |
 | **Review** | `codex-pr-review` (default) or `council` (opt-in) | Sequential Codex pass on the diff with risk-tiered iteration count (1/2/3 passes for low/medium/high). Swap in `council` for parallel multi-model dispatch if you want higher rigor. | Codex (default) or multi-model |
 | **Triage** | `bugbot` | Fetches automated reviewer findings, auto-fixes real bugs, dismisses false positives | Claude |
-| **Deploy** (opt-in) | `deploy` | Deploys via configured adapter (`vercel` \| `fly` \| `render` \| `generic`) with optional log streaming, health check, and bounded auto-rollback (see [Deploy phase](#deploy-phase)). Not on the default `/autopilot` critical path: the autopilot loop ends at merge, and your CI/CD handles prod. Invoke `claude-autopilot deploy` directly, or wire it into the autopilot skill as Step 10. | Deterministic |
+| **Deploy** (opt-in) | `deploy` | Deploys via configured adapter (`vercel` \| `fly` \| `render` \| `generic`) with optional log streaming, health check, and bounded auto-rollback (see [Deploy phase](#deploy-phase)). Not on the default `/autopilot` critical path: the autopilot loop ends at merge, and your CI/CD handles prod. Invoke `cadence deploy` directly, or wire it into the autopilot skill as Step 10. | Deterministic |
 
 ### Migrate phase
 
-Configure your migration tool in `.autopilot/stack.md`. The pipeline reads stack.md, dispatches to the configured skill (`migrate@1` for generic; `migrate.supabase@1` for rich Supabase ledger; `none@1` to skip), and runs your tool with full safety: structured argv (no shell injection), 4-flag CI prod gate, hash-chained audit log. Run `claude-autopilot init` to auto-detect your stack — the detector recognizes Rails, Alembic, Django, Prisma, Drizzle, golang-migrate, dbmate, flyway, supabase-cli, ecto, typeorm, and falls back to a "configure manually" path. See [docs/skills/rich-migrate-contract.md](docs/skills/rich-migrate-contract.md) for the skill contract and [docs/skills/version-compatibility.md](docs/skills/version-compatibility.md) for the version model.
+Configure your migration tool in `.autopilot/stack.md`. The pipeline reads stack.md, dispatches to the configured skill (`migrate@1` for generic; `migrate.supabase@1` for rich Supabase ledger; `none@1` to skip), and runs your tool with full safety: structured argv (no shell injection), 4-flag CI prod gate, hash-chained audit log. Run `cadence init` to auto-detect your stack — the detector recognizes Rails, Alembic, Django, Prisma, Drizzle, golang-migrate, dbmate, flyway, supabase-cli, ecto, typeorm, and falls back to a "configure manually" path. See [docs/skills/rich-migrate-contract.md](docs/skills/rich-migrate-contract.md) for the skill contract and [docs/skills/version-compatibility.md](docs/skills/version-compatibility.md) for the version model.
 
 Generic example (Rails):
 
@@ -179,16 +187,16 @@ deploy:
   rollbackOn: [healthCheckFailure]
 ```
 
-`claude-autopilot doctor` checks for the relevant auth env var when an adapter is configured. See `docs/specs/v5.6-fly-render-adapters.md` for the full adapter contract.
+`cadence doctor` checks for the relevant auth env var when an adapter is configured. See `docs/specs/v5.6-fly-render-adapters.md` for the full adapter contract.
 
 ## What's distinctive
 
 Features that are hard or impossible to find in the competitive set:
 
 - **Risk-tiered review depth (policy-driven).** Specs are tagged `risk: low | medium | high` in their frontmatter, with auto-escalation by keyword detection for sensitive categories (auth, multi-tenancy, sandboxing, billing, secrets, migrations, RLS, deploy/IAM, vector-DB tenancy — extend the list in the skill for your codebase). The pipeline runs 1 / 2 / 3 sequential Codex passes accordingly, each with a remediation cycle in between. Enforcement is encoded in `.claude/skills/autopilot/SKILL.md` (LLM-driven instructions, not a hard CLI gate), so it's auditable and editable. For teams that need hard enforcement, gate the merge step on the configured pass count by extending the skill or wrapping the CLI.
-- **Retry-loop sameness detector.** Validate / Codex / bugbot retry loops compute a failure fingerprint before consuming each retry. If the same fingerprint fires twice in a row, the pipeline halts and surfaces it to you — instead of burning the remaining retry budget on attempts that are making no progress. Available as a public subpath import (`@delegance/claude-autopilot/run-state/sameness-detector`) for embedding into your own retry loops.
-- **Multi-model council, available as a verb.** `claude-autopilot council` dispatches the same prompt to 3+ models in parallel and synthesizes the consensus. Opt-in for the autopilot pipeline (wire it into Step 7 of the autopilot skill), or invoke standalone for design decisions and architecture questions.
-- **Fix with test verification.** `claude-autopilot fix --verify` runs your full test suite after every patch and reverts on failure. Safer than any tool that proposes fixes without running your tests.
+- **Retry-loop sameness detector.** Validate / Codex / bugbot retry loops compute a failure fingerprint before consuming each retry. If the same fingerprint fires twice in a row, the pipeline halts and surfaces it to you — instead of burning the remaining retry budget on attempts that are making no progress. Available as a public subpath import (`@delegance/cadence/run-state/sameness-detector`) for embedding into your own retry loops.
+- **Multi-model council, available as a verb.** `cadence council` dispatches the same prompt to 3+ models in parallel and synthesizes the consensus. Opt-in for the autopilot pipeline (wire it into Step 7 of the autopilot skill), or invoke standalone for design decisions and architecture questions.
+- **Fix with test verification.** `cadence fix --verify` runs your full test suite after every patch and reverts on failure. Safer than any tool that proposes fixes without running your tests.
 - **Bug-bot auto-triage.** Watches Cursor BugBot / Copilot comments on your PR, triages each (real bug vs false positive), auto-fixes confirmed bugs, dismisses noise with explanations.
 - **Schema alignment rule.** Ensures DB migrations, backend types, and frontend types stay in sync. Custom static rule, not something any competitor ships.
 - **SARIF output + GitHub Code Scanning integration.** Findings appear as annotations in the PR and in the Security tab.
@@ -198,25 +206,27 @@ Features that are hard or impossible to find in the competitive set:
 If you don't want the full pipeline, the review subcommands are a strict superset of what `guardrail run` used to do: LLM code review over git-changed files, SARIF output, inline PR comments, auto-fix, baselines, per-finding triage, cost budgets. The legacy `guardrail` CLI remains aliased to the review subcommands through v5.x.
 
 ```bash
-claude-autopilot run                             # review changes since main
-claude-autopilot run --inline-comments           # post per-line PR annotations
-claude-autopilot run --format sarif --output out.sarif
-claude-autopilot fix --verify                    # LLM patch + test gate + revert on fail
+cadence run                             # review changes since main
+cadence run --inline-comments           # post per-line PR annotations
+cadence run --format sarif --output out.sarif
+cadence fix --verify                    # LLM patch + test gate + revert on fail
 ```
 
-> **CLI note:** subcommands are flat (`run`, `scan`, `ci`, `fix`, `baseline`, `explain`, …). The grouped `claude-autopilot review <verb>` form is also accepted as an alias — flat and grouped both work.
+> **CLI note:** subcommands are flat (`run`, `scan`, `ci`, `fix`, `baseline`, `explain`, …). The grouped `cadence review <verb>` form is also accepted as an alias — flat and grouped both work. The legacy `claude-autopilot` and `guardrail` bins still answer to all of the above.
 
 ## Install & requirements
 
 ```bash
-npm install -g @delegance/claude-autopilot
+npm install -g @delegance/cadence
 ```
+
+Migrating from the old name? `npm uninstall -g @delegance/claude-autopilot && npm install -g @delegance/cadence`. The legacy `claude-autopilot` CLI continues to work as an alias through v8.x.
 
 - Node 22+
 - `gh` CLI (for PR phases)
 - One of: `ANTHROPIC_API_KEY` (recommended), `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `GROQ_API_KEY`
 - Claude Code CLI (for skill-based phases — pipeline falls back to direct CLI invocations without it, but loses interactive checkpoints)
-- `superpowers` Claude Code plugin (required for pipeline phases — `claude-autopilot doctor` will remediation-hint if missing)
+- `superpowers` Claude Code plugin (required for pipeline phases — `cadence doctor` will remediation-hint if missing)
 
 ---
 
@@ -321,7 +331,7 @@ reviewEngine:
 ## GitHub Actions
 
 ```yaml
-- uses: axledbetter/claude-autopilot/.github/actions/ci@main
+- uses: axledbetter/cadence/.github/actions/ci@main
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     # Optional:
@@ -383,22 +393,22 @@ Four pluggable adapter points:
 
 ## Reproducing the benchmark
 
-The 13/13 benchmark cited in the [Benchmark](#benchmark) section is reproducible end-to-end. The fixture is a minimal Next.js app that seeds each of the README-advertised bug categories at a specific file:line, then `claude-autopilot scan --all` is run with the `claude` adapter and the result is compared to the seed list.
+The 13/13 benchmark cited in the [Benchmark](#benchmark) section is reproducible end-to-end. The fixture is a minimal Next.js app that seeds each of the README-advertised bug categories at a specific file:line, then `cadence scan --all` is run with the `claude` adapter and the result is compared to the seed list.
 
 ```bash
 # 1. Install the CLI
-npm install -g @delegance/claude-autopilot
+npm install -g @delegance/cadence
 
 # 2. Seed the fixture (one file per bug category)
 SEED=$(mktemp -d) && cd $SEED && npm init -y >/dev/null
 mkdir -p app/api/{users,coupons,profile,redirect,proxy} lib
 
 # (Add the 13 seeded files — the canonical fixture lives at
-#  https://github.com/axledbetter/claude-autopilot/tree/master/tests/v4-compat/fixtures/13-bugs)
+#  https://github.com/axledbetter/cadence/tree/master/tests/v4-compat/fixtures/13-bugs)
 
 # 3. Init + scan
-claude-autopilot init --preset nextjs-supabase
-ANTHROPIC_API_KEY=sk-ant-... claude-autopilot scan --all
+cadence init --preset nextjs-supabase
+ANTHROPIC_API_KEY=sk-ant-... cadence scan --all
 ```
 
 **What "13 of 13" means:** the scan output flags each category as a distinct critical or warning finding with file path, line, and concrete remediation. We count one hit per seed regardless of severity bucket. The categories are: SQL injection, hardcoded secret, missing auth, IDOR, CORS wildcard, SSRF, open redirect, TOCTOU race, silent error swallow, off-by-one, missing rate limit, console.log in prod, missing input validation.
@@ -410,28 +420,30 @@ ANTHROPIC_API_KEY=sk-ant-... claude-autopilot scan --all
 
 We do not claim 13/13 reflects every real-world repo — it's a reproducible upper bound on a fixture that exercises the categories we explicitly target.
 
-## What's Next (v8.0.0)
+## What's Next
 
-v7.8.0 begins decoupling runtime deps so local-only users can install a
-leaner package:
+The v7.x decoupling work (initially scoped for v8.0.0) is being re-staged
+now that v8.0.0 is reserved for the Cadence brand reset:
 
-- **`tsx` is being removed from `dependencies` in v8.0.0.** Today it ships
+- **`tsx` will eventually be removed from `dependencies`.** Today it ships
   bundled and the launcher prefers a project-local install if you have one,
   falling back to the bundled copy with a once-per-day deprecation warning.
-  In v8.0.0 the bundled fallback goes away — install `tsx` locally
-  (`npm install -D tsx`) or set `CLAUDE_AUTOPILOT_TSX=path` to use a global
-  install.
-- **The hosted-dashboard upload is moving to a separate optional package
-  (`@delegance/claude-autopilot-cloud`)** so you can skip Supabase entirely
-  with `npm install --omit=optional` today, and skip the dep entirely with
-  v8.0.0. The smoke workflow `.github/workflows/omit-optional-smoke.yml`
-  verifies the install-with-omit path on every PR.
+  When the bundled fallback goes away in a future major, you'll install
+  `tsx` locally (`npm install -D tsx`) or set `CLAUDE_AUTOPILOT_TSX=path` to
+  use a global install. (The env-var name keeps the `CLAUDE_AUTOPILOT_`
+  prefix for backward compatibility — renaming it would force another
+  breaking change on operators for zero payoff.)
+- **The hosted-dashboard upload may move to a separate optional package
+  (`@delegance/cadence-cloud`)** so you can skip Supabase entirely with
+  `npm install --omit=optional` today, and skip the dep entirely later. The
+  smoke workflow `.github/workflows/omit-optional-smoke.yml` verifies the
+  install-with-omit path on every PR.
 
-Track the v8.0.0 plan and request comments at https://github.com/axledbetter/claude-autopilot/issues
+Track future plans and open issues at https://github.com/axledbetter/cadence/issues
 
 ## Contributing
 
-Issues and PRs welcome — https://github.com/axledbetter/claude-autopilot/issues. The pipeline literally builds itself; many features in this repo were implemented by autopilot running against autopilot ([DEMO.md](DEMO.md) walks through six self-eat PRs with cost trajectory $10 → ~$2.50). Read [CONTRIBUTING.md](CONTRIBUTING.md) if it exists, otherwise: clone, `npm install`, `npm test`, open a PR.
+Issues and PRs welcome — https://github.com/axledbetter/cadence/issues. The pipeline literally builds itself; many features in this repo were implemented by autopilot running against autopilot ([DEMO.md](DEMO.md) walks through six self-eat PRs with cost trajectory $10 → ~$2.50). Read [CONTRIBUTING.md](CONTRIBUTING.md) if it exists, otherwise: clone, `npm install`, `npm test`, open a PR.
 
 ## License
 
