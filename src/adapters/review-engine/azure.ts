@@ -95,8 +95,35 @@ export const azureAdapter: ReviewEngine = {
       process.env.AZURE_OPENAI_API_VERSION ??
       DEFAULT_API_VERSION;
 
-    const normalizedEndpoint = endpoint.replace(/\/+$/, '');
-    const baseURL = `${normalizedEndpoint}/openai/deployments/${deployment}`;
+    // Strict endpoint normalization (Codex WARNING #1): reject endpoints with
+    // path / query / hash to prevent unexpected routing, require https://,
+    // and percent-encode the deployment segment. The URL API does origin
+    // parsing for us so we don't fall into trailing-slash / fragment traps.
+    let endpointOrigin: string;
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== 'https:') {
+        throw new GuardrailError(
+          `AZURE_OPENAI_ENDPOINT must use https:// (got ${parsed.protocol})`,
+          { code: 'invalid_config', provider: 'azure' },
+        );
+      }
+      const hasPath = parsed.pathname && parsed.pathname !== '/';
+      if (hasPath || parsed.search || parsed.hash) {
+        throw new GuardrailError(
+          `AZURE_OPENAI_ENDPOINT must be an origin only (no path, query, or fragment) — got ${endpoint}`,
+          { code: 'invalid_config', provider: 'azure' },
+        );
+      }
+      endpointOrigin = parsed.origin;
+    } catch (err) {
+      if (err instanceof GuardrailError) throw err;
+      throw new GuardrailError(
+        `AZURE_OPENAI_ENDPOINT is not a valid URL: ${endpoint}`,
+        { code: 'invalid_config', provider: 'azure' },
+      );
+    }
+    const baseURL = `${endpointOrigin}/openai/deployments/${encodeURIComponent(deployment)}`;
 
     const systemPrompt = buildSystemPrompt(input, SYSTEM_PROMPT_TEMPLATE);
     const OpenAI = await _sdkLoader();

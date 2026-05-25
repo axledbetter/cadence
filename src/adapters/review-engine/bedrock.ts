@@ -75,18 +75,27 @@ export const bedrockAdapter: ReviewEngine = {
   async review(input: ReviewInput): Promise<ReviewOutput> {
     const opts = (input.context as Record<string, unknown> | undefined) ?? {};
 
+    // Credential resolution: prefer the AWS SDK default credential provider
+    // chain (ECS task roles, EC2 instance metadata, EKS web identity, SSO,
+    // shared config files, env vars) — DO NOT require static env-var keys.
+    // This is the secure-by-default pattern for ECS/EKS deployments where
+    // long-lived AWS keys should never be present in env.
+    //
+    // If the caller has explicitly set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+    // (e.g. local dev with IAM user keys), the SDK will pick those up via the
+    // chain automatically — no special-casing needed here.
     const accessKey = process.env.AWS_ACCESS_KEY_ID;
     const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
-    if (!accessKey || !secretKey) {
+    const partialEnvCreds = (!!accessKey) !== (!!secretKey);
+    if (partialEnvCreds) {
       throw new GuardrailError(
-        'AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY required for bedrock adapter',
+        'AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together (or neither — fall back to the AWS SDK default credential chain)',
         { code: 'auth', provider: 'bedrock' },
       );
     }
 
     const region = (opts['region'] as string | undefined) ?? process.env.AWS_REGION ?? DEFAULT_REGION;
     const model = (opts['model'] as string | undefined) ?? process.env.BEDROCK_MODEL_ID ?? DEFAULT_MODEL;
-    const sessionToken = process.env.AWS_SESSION_TOKEN;
 
     const systemPrompt = buildSystemPrompt(input, SYSTEM_PROMPT_TEMPLATE);
     const requestBody = {
@@ -99,14 +108,19 @@ export const bedrockAdapter: ReviewEngine = {
     const { BedrockRuntimeClient, InvokeModelCommand, InvokeModelWithResponseStreamCommand } =
       await _sdkLoader();
 
-    const client = new BedrockRuntimeClient({
-      region,
-      credentials: {
+    // Build the client config: only pass explicit `credentials` when both
+    // env-var keys are set, otherwise let the SDK resolve via its default
+    // chain (task role / instance metadata / SSO / shared config).
+    const clientConfig: Record<string, unknown> = { region };
+    if (accessKey && secretKey) {
+      const sessionToken = process.env.AWS_SESSION_TOKEN;
+      clientConfig['credentials'] = {
         accessKeyId: accessKey,
         secretAccessKey: secretKey,
         ...(sessionToken ? { sessionToken } : {}),
-      },
-    });
+      };
+    }
+    const client = new BedrockRuntimeClient(clientConfig);
 
     const useStreaming = opts['stream'] === true;
 

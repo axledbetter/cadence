@@ -293,7 +293,7 @@ chunking:
 | `claude` | `ANTHROPIC_API_KEY` | Claude Opus 4.7 |
 | `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Gemini 2.5 Pro, 1M context |
 | `codex` | `OPENAI_API_KEY` | GPT-5 Codex |
-| `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | AWS Bedrock — Claude Sonnet 4.5 default, streaming supported. Optional `AWS_REGION` (default `us-east-1`), `AWS_SESSION_TOKEN` (STS). Install `@aws-sdk/client-bedrock-runtime`. |
+| `bedrock` | AWS SDK default credential chain | AWS Bedrock — Claude Sonnet 4.5 default, streaming supported. Resolves credentials via the standard chain (ECS task role, EC2 instance metadata, EKS web identity, SSO, shared config, env vars). Optional `AWS_REGION` (default `us-east-1`). Install `@aws-sdk/client-bedrock-runtime`. |
 | `azure` | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT_NAME` | Azure OpenAI — deployment-routed (`/openai/deployments/{deployment}`). Default api-version `2024-10-21`. |
 | `cohere` | `COHERE_API_KEY` | Cohere `command-r-plus-08-2024` default, streaming supported. Install `cohere-ai`. |
 | `mistral` | `MISTRAL_API_KEY` | Mistral La Plateforme — `mistral-large-latest` default, streaming supported. Reuses OpenAI SDK. |
@@ -303,7 +303,9 @@ chunking:
 
 #### OpenAI-compatible providers
 
-The `openai-compatible` adapter speaks the standard OpenAI Chat Completions wire shape and accepts an arbitrary `baseUrl` + `apiKeyEnv`. Every provider in the table below works out of the box — pick one, paste the snippet into `guardrail.config.yaml`, and set the named env var.
+The `openai-compatible` adapter speaks the standard OpenAI Chat Completions wire shape. Each of the providers below is configured via the OpenAI-compatible adapter — pick one, paste the snippet into `guardrail.config.yaml`, and set the named env var.
+
+> **Security note.** `openai-compatible` accepts an arbitrary `baseUrl` and `apiKeyEnv` from your `guardrail.config.yaml`. The named env var's value is sent as the API key to that URL. **Only use `openai-compatible` with `guardrail.config.yaml` files you trust** — if an attacker can edit your config (e.g. via an unreviewed PR or untrusted repo), they can point `baseUrl` at an attacker-controlled endpoint and set `apiKeyEnv` to a sensitive variable name to exfiltrate it. Treat `guardrail.config.yaml` like any other secret-adjacent config file in code review. The direct provider adapters (`bedrock`, `azure`, `cohere`, `mistral`, `claude`, `gemini`, `codex`) use fixed env var names and fixed endpoints, so they are not subject to this concern.
 
 | Provider | `baseUrl` | `apiKeyEnv` |
 |---|---|---|
@@ -416,8 +418,12 @@ reviewEngine:
   # options:
   #   model: anthropic.claude-sonnet-4-5-20250929-v1:0
   #   region: us-east-1
-# Env: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY required.
-# Optional: AWS_REGION, AWS_SESSION_TOKEN (STS).
+# Credentials: resolved via the AWS SDK default credential provider chain —
+#   ECS task role / EC2 instance metadata / EKS web identity / SSO / shared
+#   config / env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, optionally
+#   AWS_SESSION_TOKEN for STS). The secure pattern in ECS/EKS is to use a
+#   task role and NOT set static keys in env.
+# Optional: AWS_REGION (default us-east-1).
 # Install: npm install @aws-sdk/client-bedrock-runtime
 ```
 

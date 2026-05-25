@@ -156,8 +156,8 @@ describe('azureAdapter — deployment routing (mocked SDK)', () => {
     __setAzureSdkLoader(null);
   });
 
-  it('strips trailing slash from endpoint', async () => {
-    process.env.AZURE_OPENAI_ENDPOINT = 'https://my-resource.openai.azure.com//';
+  it('strips trailing slash from endpoint via URL origin normalization', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'https://my-resource.openai.azure.com/';
     const capture: AzureCapture = {};
     const Mock = makeMockOpenAICtor(capture, '### [NOTE] x\nbody\n**Suggestion:** y');
     const { azureAdapter, __setAzureSdkLoader } = await import(
@@ -172,6 +172,23 @@ describe('azureAdapter — deployment routing (mocked SDK)', () => {
     __setAzureSdkLoader(null);
   });
 
+  it('percent-encodes deployment names with unsafe characters', async () => {
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME = 'my dep/with spaces';
+    const capture: AzureCapture = {};
+    const Mock = makeMockOpenAICtor(capture, '### [NOTE] x\nbody\n**Suggestion:** y');
+    const { azureAdapter, __setAzureSdkLoader } = await import(
+      '../src/adapters/review-engine/azure.ts'
+    );
+    __setAzureSdkLoader(async () => Mock);
+    await azureAdapter.review({ content: 'x', kind: 'file-batch' });
+    assert.ok(
+      capture.baseURL?.endsWith('/openai/deployments/my%20dep%2Fwith%20spaces'),
+      `expected percent-encoded segment, got ${capture.baseURL}`,
+    );
+    __setAzureSdkLoader(null);
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME = 'gpt-4o-deployment';
+  });
+
   it('honors AZURE_OPENAI_API_VERSION override', async () => {
     process.env.AZURE_OPENAI_API_VERSION = '2025-01-01';
     const capture: AzureCapture = {};
@@ -184,6 +201,59 @@ describe('azureAdapter — deployment routing (mocked SDK)', () => {
     assert.equal(capture.defaultQuery?.['api-version'], '2025-01-01');
     __setAzureSdkLoader(null);
     delete process.env.AZURE_OPENAI_API_VERSION;
+  });
+});
+
+describe('azureAdapter — endpoint validation (Codex WARNING #1)', () => {
+  before(() => {
+    process.env.AZURE_OPENAI_API_KEY = 'azure-key';
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME = 'gpt-4o-deployment';
+  });
+  after(restoreEnv);
+
+  it('rejects http:// (non-https) endpoint', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'http://my-resource.openai.azure.com';
+    const { azureAdapter } = await import('../src/adapters/review-engine/azure.ts');
+    await assert.rejects(
+      () => azureAdapter.review({ content: 'x', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('https://'),
+    );
+  });
+
+  it('rejects endpoint with path component', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'https://my-resource.openai.azure.com/foo';
+    const { azureAdapter } = await import('../src/adapters/review-engine/azure.ts');
+    await assert.rejects(
+      () => azureAdapter.review({ content: 'x', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('origin only'),
+    );
+  });
+
+  it('rejects endpoint with query string', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'https://my-resource.openai.azure.com?evil=1';
+    const { azureAdapter } = await import('../src/adapters/review-engine/azure.ts');
+    await assert.rejects(
+      () => azureAdapter.review({ content: 'x', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('origin only'),
+    );
+  });
+
+  it('rejects endpoint with hash fragment', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'https://my-resource.openai.azure.com#frag';
+    const { azureAdapter } = await import('../src/adapters/review-engine/azure.ts');
+    await assert.rejects(
+      () => azureAdapter.review({ content: 'x', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('origin only'),
+    );
+  });
+
+  it('rejects malformed endpoint URL', async () => {
+    process.env.AZURE_OPENAI_ENDPOINT = 'not-a-url';
+    const { azureAdapter } = await import('../src/adapters/review-engine/azure.ts');
+    await assert.rejects(
+      () => azureAdapter.review({ content: 'x', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('not a valid URL') || err.message.includes('https://'),
+    );
   });
 });
 

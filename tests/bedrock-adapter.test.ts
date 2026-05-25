@@ -122,27 +122,116 @@ describe('bedrockAdapter — basic shape', () => {
   });
 });
 
-describe('bedrockAdapter — auth env validation', () => {
-  after(restoreEnv);
-
-  it('throws auth error when AWS_ACCESS_KEY_ID is missing', async () => {
-    delete process.env.AWS_ACCESS_KEY_ID;
-    process.env.AWS_SECRET_ACCESS_KEY = 'TEST_SECRET';
-    const { bedrockAdapter } = await import('../src/adapters/review-engine/bedrock.ts');
-    await assert.rejects(
-      () => bedrockAdapter.review({ content: 'test', kind: 'file-batch' }),
-      (err: Error) => err.message.includes('AWS_ACCESS_KEY_ID'),
-    );
+describe('bedrockAdapter — credential resolution', () => {
+  after(async () => {
+    const { __setBedrockSdkLoader } = await import('../src/adapters/review-engine/bedrock.ts');
+    __setBedrockSdkLoader(null);
+    restoreEnv();
   });
 
-  it('throws auth error when AWS_SECRET_ACCESS_KEY is missing', async () => {
+  it('throws when AWS_ACCESS_KEY_ID set but AWS_SECRET_ACCESS_KEY missing (partial creds)', async () => {
     process.env.AWS_ACCESS_KEY_ID = 'AKIA_TEST';
     delete process.env.AWS_SECRET_ACCESS_KEY;
     const { bedrockAdapter } = await import('../src/adapters/review-engine/bedrock.ts');
     await assert.rejects(
       () => bedrockAdapter.review({ content: 'test', kind: 'file-batch' }),
-      (err: Error) => err.message.includes('AWS_ACCESS_KEY_ID'),
+      (err: Error) => err.message.includes('must be set together'),
     );
+  });
+
+  it('throws when AWS_SECRET_ACCESS_KEY set but AWS_ACCESS_KEY_ID missing (partial creds)', async () => {
+    delete process.env.AWS_ACCESS_KEY_ID;
+    process.env.AWS_SECRET_ACCESS_KEY = 'TEST_SECRET';
+    const { bedrockAdapter } = await import('../src/adapters/review-engine/bedrock.ts');
+    await assert.rejects(
+      () => bedrockAdapter.review({ content: 'test', kind: 'file-batch' }),
+      (err: Error) => err.message.includes('must be set together'),
+    );
+  });
+
+  it('falls back to default credential chain when NO env-var keys are set', async () => {
+    // Bug Codex flagged: bedrock previously REQUIRED env-var keys, which
+    // broke secure ECS/EKS deployments that use task roles. The adapter
+    // should let the SDK resolve credentials from its default chain (ECS
+    // task role / instance metadata / SSO / shared config) when env keys
+    // are absent. We verify this by mocking the SDK and asserting that the
+    // BedrockRuntimeClient is constructed WITHOUT an explicit `credentials`
+    // field — letting the AWS SDK do its own credential resolution.
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+    delete process.env.AWS_SESSION_TOKEN;
+
+    let constructorConfig: Record<string, unknown> | undefined;
+    const responseBody = {
+      content: [{ type: 'text', text: '### [NOTE] x\nbody\n**Suggestion:** y' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const mockMod = {
+      BedrockRuntimeClient: class {
+        constructor(cfg: Record<string, unknown>) {
+          constructorConfig = cfg;
+        }
+        async send() {
+          return { body: new TextEncoder().encode(JSON.stringify(responseBody)) };
+        }
+      },
+      InvokeModelCommand: class {
+        constructor(public input: unknown) {}
+      },
+      InvokeModelWithResponseStreamCommand: class {
+        constructor(public input: unknown) {}
+      },
+    };
+    const { bedrockAdapter, __setBedrockSdkLoader } = await import(
+      '../src/adapters/review-engine/bedrock.ts'
+    );
+    __setBedrockSdkLoader(async () => mockMod);
+    await bedrockAdapter.review({ content: 'x', kind: 'file-batch' });
+    assert.ok(constructorConfig, 'BedrockRuntimeClient was not constructed');
+    assert.equal(
+      constructorConfig['credentials'],
+      undefined,
+      'expected adapter to omit `credentials` and let the SDK default chain resolve them',
+    );
+    assert.equal(constructorConfig['region'], 'us-east-1');
+    __setBedrockSdkLoader(null);
+  });
+
+  it('uses explicit env-var credentials when BOTH keys are set', async () => {
+    process.env.AWS_ACCESS_KEY_ID = 'AKIA_TEST';
+    process.env.AWS_SECRET_ACCESS_KEY = 'TEST_SECRET';
+    let constructorConfig: Record<string, unknown> | undefined;
+    const responseBody = {
+      content: [{ type: 'text', text: '### [NOTE] x\nbody\n**Suggestion:** y' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const mockMod = {
+      BedrockRuntimeClient: class {
+        constructor(cfg: Record<string, unknown>) {
+          constructorConfig = cfg;
+        }
+        async send() {
+          return { body: new TextEncoder().encode(JSON.stringify(responseBody)) };
+        }
+      },
+      InvokeModelCommand: class {
+        constructor(public input: unknown) {}
+      },
+      InvokeModelWithResponseStreamCommand: class {
+        constructor(public input: unknown) {}
+      },
+    };
+    const { bedrockAdapter, __setBedrockSdkLoader } = await import(
+      '../src/adapters/review-engine/bedrock.ts'
+    );
+    __setBedrockSdkLoader(async () => mockMod);
+    await bedrockAdapter.review({ content: 'x', kind: 'file-batch' });
+    const creds = constructorConfig?.['credentials'] as
+      | { accessKeyId?: string; secretAccessKey?: string }
+      | undefined;
+    assert.equal(creds?.accessKeyId, 'AKIA_TEST');
+    assert.equal(creds?.secretAccessKey, 'TEST_SECRET');
+    __setBedrockSdkLoader(null);
   });
 });
 
