@@ -206,6 +206,11 @@ describe('mistralAdapter — error mapping (mocked SDK)', () => {
   it('500 maps to transient_network', async () => {
     assert.equal((await runWithStatus(500)).code, 'transient_network');
   });
+
+  it('500 transient_network is retryable=true (bugbot regression)', async () => {
+    const err = (await runWithStatus(500)) as Error & { retryable?: boolean };
+    assert.equal(err.retryable, true);
+  });
 });
 
 describe('adapter loader — mistral registration', () => {

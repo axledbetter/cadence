@@ -150,7 +150,9 @@ export const cohereAdapter: ReviewEngine = {
       throw new GuardrailError(`Cohere review call failed: ${message}`, {
         code,
         provider: 'cohere',
-        retryable: code === 'rate_limit',
+        // Bugbot MEDIUM: transient_network must also be retryable, matching
+        // the bedrock adapter and the PR's stated error-mapping parity.
+        retryable: code === 'rate_limit' || code === 'transient_network',
       });
     }
   },

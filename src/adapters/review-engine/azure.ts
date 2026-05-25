@@ -156,7 +156,11 @@ export const azureAdapter: ReviewEngine = {
       throw new GuardrailError(`Azure OpenAI review call failed: ${message}`, {
         code,
         provider: 'azure',
-        retryable: code === 'rate_limit',
+        // Bugbot MEDIUM: transient_network (5xx, network drops) should be
+        // retryable too — matches the bedrock adapter's behavior. Earlier
+        // pass only set this on rate_limit, contradicting the PR's stated
+        // error-mapping parity.
+        retryable: code === 'rate_limit' || code === 'transient_network',
       });
     }
 

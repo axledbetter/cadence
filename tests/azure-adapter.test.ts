@@ -295,6 +295,21 @@ describe('azureAdapter — error mapping (mocked SDK)', () => {
   it('503 maps to transient_network', async () => {
     assert.equal((await runWithStatus(503)).code, 'transient_network');
   });
+
+  it('503 transient_network is retryable=true (bugbot regression)', async () => {
+    const err = (await runWithStatus(503)) as Error & { retryable?: boolean };
+    assert.equal(err.retryable, true);
+  });
+
+  it('429 rate_limit is retryable=true', async () => {
+    const err = (await runWithStatus(429)) as Error & { retryable?: boolean };
+    assert.equal(err.retryable, true);
+  });
+
+  it('401 auth is retryable=false', async () => {
+    const err = (await runWithStatus(401)) as Error & { retryable?: boolean };
+    assert.equal(err.retryable, false);
+  });
 });
 
 describe('adapter loader — azure registration', () => {
