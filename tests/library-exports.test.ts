@@ -69,8 +69,9 @@ describe('library export surface (v7.3.0)', () => {
     assert.match(dot.default, /^\.\/dist\//, 'default points at dist/');
     // Exports map intentionally does NOT expose ./cli/*, ./core/*, etc.
     // Consumers who need internals can deep-import via a deliberate
-    // unsupported path. As of v7.10.0, `./run-state/sameness-detector` is
-    // an explicit public subpath consumed by the autopilot skill agent.
+    // unsupported path. Public subpath exports as of v7.11.0:
+    //   - ./run-state/sameness-detector (added v7.10.0)
+    //   - ./concurrent-dispatch (added v7.11.0)
     const supportedKeys = Object.keys(pkg.exports).sort();
     assert.deepEqual(
       supportedKeys,
@@ -78,15 +79,21 @@ describe('library export surface (v7.3.0)', () => {
         '.',
         './bin/claude-autopilot.js',
         './bin/guardrail.js',
+        './concurrent-dispatch',
         './package.json',
         './run-state/sameness-detector',
       ].sort(),
-      'export map shape is the locked v7.10.0 set',
+      'export map shape is the locked v7.11.0 set',
     );
     // Verify the sameness-detector subpath points at compiled output.
     const sd = pkg.exports['./run-state/sameness-detector'];
     assert.ok(sd, 'has sameness-detector subpath export');
     assert.match(sd.types, /^\.\/dist\//, 'sameness-detector types in dist/');
     assert.match(sd.default, /^\.\/dist\//, 'sameness-detector default in dist/');
+    // Verify the concurrent-dispatch subpath points at compiled output.
+    const cd = pkg.exports['./concurrent-dispatch'];
+    assert.ok(cd, 'has concurrent-dispatch subpath export');
+    assert.match(cd.types, /^\.\/dist\//, 'concurrent-dispatch types in dist/');
+    assert.match(cd.default, /^\.\/dist\//, 'concurrent-dispatch default in dist/');
   });
 });

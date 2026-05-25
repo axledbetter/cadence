@@ -2,6 +2,169 @@
 
 - v5.6 Phase 7 (docs reconciliation) — pending.
 
+## 7.11.0 — 2026-05-20
+
+**v7.11.0 — Concurrent subagent dispatch (GA).** This release closes the
+v7.11.0 stack landed as `v7.11.0-pre.1` through `v7.11.0-pre.5` and ships
+the user-facing skill + schema + release wiring. The implementation was
+split into six PRs for reviewability (see PR links below); the published
+version users install is `7.11.0` on npm `latest`. The five `pre.*` tags
+remain in git history as the implementation breakdown.
+
+Spec: [PR #187](https://github.com/axledbetter/claude-autopilot/pull/187)
+([`docs/superpowers/specs/2026-05-19-v7.11.0-concurrent-subagent-execution-design.md`](docs/superpowers/specs/2026-05-19-v7.11.0-concurrent-subagent-execution-design.md)).
+
+Implementation PRs:
+- [#197](https://github.com/axledbetter/claude-autopilot/pull/197) — dep graph foundations (`v7.11.0-pre.1`).
+- [#198](https://github.com/axledbetter/claude-autopilot/pull/198) — locking primitives (`v7.11.0-pre.2`).
+- [#199](https://github.com/axledbetter/claude-autopilot/pull/199) — event + budget atomicity (`v7.11.0-pre.3`).
+- [#200](https://github.com/axledbetter/claude-autopilot/pull/200) — scheduler + worktree lifecycle (`v7.11.0-pre.4`).
+- [#201](https://github.com/axledbetter/claude-autopilot/pull/201) — merge orchestrator (`v7.11.0-pre.5`).
+- This PR (#193) — SKILL integration + release wiring.
+
+### Added
+
+- **Concurrent subagent dispatch in autopilot Step 3.** The sequential
+  one-task-at-a-time loop is replaced with a tier-based scheduler that
+  dispatches independent plan tasks in parallel into isolated per-task
+  worktrees under `.claude/worktrees/<run-ulid>/<task-id>/`. A dedicated
+  integration worktree at `.claude/worktrees/<run-ulid>/integration/` owns
+  the only checkout of `feature/<topic-slug>`; the main repo working tree
+  is never touched for the duration of the run.
+- **`depends_on:` annotation in plan files** (documented in
+  `skills/writing-plans/SKILL.md`). Tasks declare dependencies by `### Task
+  N: <name>` reference; the scheduler builds a DAG, detects cycles, and
+  topologically sorts tasks into dispatchable tiers. Multi-commit task
+  branches are cherry-picked in `git rev-list --reverse base..tip` order,
+  producing a linear feature-branch history.
+- **`concurrency:` config block in `guardrail.config.yaml`** (schema:
+  `presets/schemas/guardrail.config.schema.json`). New keys:
+  - `maxParallelSubagents` (int, **range 1..8**, default 3) — invalid
+    values fail at config-load with a schema validation error.
+  - `perSubagentTimeoutMs` (int ms, default 30 minutes).
+  - `assumeIndependentWithoutDependsOn` (bool, default false).
+  - `useDedicatedMergeWorktree` (bool, default true).
+  - `allowMergeCommitsInTasks` (bool, default false).
+- **`budgets.perSubagentUSD`** — HARD cost cap per subagent. Dispatch is
+  rejected when `preFlightEstimate > perSubagentUSD`; an in-flight
+  subagent is SIGTERMed (process group; SIGKILL after 30s) and emits
+  `task.failed` if actual cost exceeds the cap mid-execution. Set to
+  `null` to disable.
+- **11 new run-state event types** for concurrent dispatch:
+  `task.started`, `task.budget_reserved`,
+  `task.budget_increased_reservation`, `task.budget_released`,
+  `task.completed`, `task.failed`, `task.merged`,
+  `task.merge_conflict`, `task.merge_aborted`, `task.timeout`,
+  `task.budget_halt`. All event writes route through a per-run serialized
+  writer that holds an exclusive `flock` on `events.ndjson` for the
+  `(replay → check → append → fsync → release)` critical section.
+- **Cross-process repo lock** at `.claude/run-state/repo.lock`, acquired
+  by every CLI command that mutates repo state (autopilot, run resume,
+  runs gc, runs cleanup). Uses `flock(LOCK_EX|LOCK_NB)` — NOT
+  check-then-create. Stale-lock detection (PID not running on host AND
+  acquired > 1 hour ago) surfaces an explicit
+  `claude-autopilot runs cleanup --force-unlock` recovery command — no
+  auto-clear.
+- **In-process git operation queue** serializing all repo-level git
+  operations (worktree add/remove, branch create/delete, cherry-pick,
+  abort, GC) so concurrent scheduler callers cannot corrupt
+  `.git/refs/` or pack files.
+- **Public package subpath export** `./concurrent-dispatch` — consumers
+  can `import { runScheduler, computeEffectiveConcurrency }` from
+  `@delegance/claude-autopilot/concurrent-dispatch` without deep-importing
+  into compiled paths.
+- **Skill integration:** `skills/autopilot/SKILL.md` Step 2 now creates
+  `feature/<topic-slug>` as a ref-only (no checkout in main worktree),
+  and Step 3 invokes the concurrent dispatcher with the fallback rule
+  enforced by `src/core/concurrent-dispatch/dep-graph.ts`. New skill
+  `skills/writing-plans/SKILL.md` documents the `depends_on:` annotation,
+  the three-clause fallback policy, and walks through a mixed
+  annotated/unannotated plan example.
+
+### Changed — new failure modes (operator-visible)
+
+These are **new behaviors v7.10.0 did not have**. Read carefully before
+upgrading:
+
+- **Cherry-pick conflict halts the run.** The merge orchestrator does NOT
+  auto-resolve, even for trivial conflicts. Diagnostics
+  (`git diff --name-only --diff-filter=U`, `git ls-files -u`, full
+  porcelain) are persisted to
+  `.claude/run-state/<run-ulid>/conflicts/<task-id>.md` BEFORE
+  `cherry-pick --abort` clears the working tree. The user resolves by
+  (a) adding an explicit `depends_on:` to the plan and rerunning,
+  (b) manually resolving in the preserved worktree, or
+  (c) marking the offending pair as sequential in
+  `guardrail.config.yaml`.
+- **Interrupted tasks require explicit confirmation on resume.** A task
+  in state `started` with NO terminal event (no `task.completed`,
+  `task.failed`, `task.timeout`) is classified `interrupted` by
+  `claude-autopilot run resume <ulid>`. The CLI refuses to auto-merge
+  any partial commits — the user must pass
+  `--confirm-interrupted-tasks <task-id>...` to either re-dispatch from
+  a clean branch (discarding partial commits) or merge what's there
+  (user accepts risk). This is stricter than the pass-1 draft, which
+  would have auto-merged "if commits present" — that was unsafe because
+  commits alone do not prove the subagent finished its task contract.
+- **`budgets.perSubagentUSD` is a HARD cap, not soft.** Dispatch is
+  rejected pre-flight if the estimate exceeds the cap, and a running
+  subagent is killed (SIGTERM → SIGKILL of its process group) if actual
+  cost overruns. To get soft-reservation semantics, omit
+  `perSubagentUSD` and rely solely on `perRunUSD`.
+- **Task branches with merge commits are rejected by default.** Set
+  `concurrency.allowMergeCommitsInTasks: true` if your subagents
+  legitimately produce merge commits.
+- **Audit-log durability — documented limitation.** Event writes are
+  single-`write(O_APPEND)` per JSONL line under the exclusive `flock`,
+  but the writer does NOT `fsync(events.ndjson)` per event. A power
+  loss between two appends can therefore lose the last few events even
+  though the file lock was held atomically. This is a deliberate
+  trade-off: per-event fsync would dominate scheduler throughput at
+  high concurrency. If your environment requires per-event durability,
+  set `maxParallelSubagents: 1` and the audit-log will degrade to
+  v7.10.0 semantics.
+
+### Fallback policy (backwards compatibility)
+
+Plans without `depends_on:` annotations continue to work without changes:
+
+- `concurrency.maxParallelSubagents: 1` → sequential dispatch
+  reproducing v7.10.0 behavior exactly.
+- ZERO tasks declare `depends_on:` → sequential by default. Existing
+  plans are NEVER silently parallelized. Override with
+  `concurrency.assumeIndependentWithoutDependsOn: true` to opt in to
+  file-overlap inference.
+- At least one task declares `depends_on:` → explicit deps + file-
+  overlap inference for the remaining unannotated tasks.
+
+Cycle detection runs in all three cases before dispatch begins.
+
+### Resume semantics
+
+`claude-autopilot run resume <ulid>` classifies tasks by their LAST
+terminal event in `events.ndjson`:
+
+- `task.merged` → DONE; skip.
+- `task.completed` (no merged) → eligible; re-run merge orchestrator if
+  deps are merged.
+- `task.failed` → terminal; surface, do not retry without intervention.
+- `task.merge_conflict` → terminal; surface report path; user must
+  resolve before resume continues.
+- `task.timeout` → terminal (dual emission of `task.timeout` +
+  `task.failed`).
+- `task.started` with no terminal event → INTERRUPTED; requires
+  `--confirm-interrupted-tasks <task-id>...`.
+
+### Out of scope (deferred, per spec)
+
+- Hosted profile sharing — separate spec.
+- AI-generated custom config — separate spec.
+- v6 run-state engine integration into the autopilot skill — issue #180.
+- Frontend quality — issue #178.
+- Expand/contract migration safety — issue #179.
+- Parallelizing validate / codex-review / bugbot steps — separate spec.
+- Distributed execution across machines — separate spec.
+
 ## 7.10.1 — 2026-05-13
 
 **v7.10.1 — `examples` verb.** Patch release. Closes the discoverability

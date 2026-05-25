@@ -372,6 +372,87 @@ function padVerb(verb: string): string {
 }
 
 /**
+ * Documentation block for the v7.11.0+ `concurrency:` configuration in
+ * `guardrail.config.yaml`. Rendered by `claude-autopilot help concurrency`
+ * (advisory pointer — there is no `concurrency` verb; this is config docs).
+ *
+ * Keep this block in sync with:
+ *   - `presets/schemas/guardrail.config.schema.json` (the validated shape)
+ *   - `skills/autopilot/SKILL.md` Step 3 (the fallback rule consumer)
+ *   - `skills/writing-plans/SKILL.md` (`depends_on:` annotation contract)
+ *   - `src/core/concurrent-dispatch/dep-graph.ts` (`DEFAULT_FALLBACK_POLICY`)
+ */
+export const CONCURRENCY_CONFIG_BLOCK = `guardrail.config.yaml — concurrency block (v7.11.0+):
+
+  concurrency:
+    maxParallelSubagents: 3              # int, range 1..8, default 3
+    perSubagentTimeoutMs: 1800000        # int ms, default 30 min (1,800,000)
+    assumeIndependentWithoutDependsOn: false  # bool, default false
+    useDedicatedMergeWorktree: true      # bool, default true
+    allowMergeCommitsInTasks: false      # bool, default false
+
+  budgets:
+    perRunUSD: 10                        # number USD, existing
+    perPhaseUSD: 5                       # number USD, existing
+    perSubagentUSD: 3                    # number USD or null (v7.11.0+)
+                                         #   HARD cap per subagent: dispatch
+                                         #   is rejected if preflight estimate
+                                         #   exceeds it; an in-flight subagent
+                                         #   is SIGTERMed if actual cost
+                                         #   exceeds it. Set null to disable.
+
+Keys:
+
+  maxParallelSubagents
+    Maximum concurrent subagents. Schema range 1..8 (enforced at config-load
+    via presets/schemas/guardrail.config.schema.json — invalid values fail).
+    Effective concurrency at runtime is further clamped by
+    providerRateLimitConcurrency and the remaining task count. Setting to 1
+    reproduces v7.10.0 sequential behavior exactly.
+
+  perSubagentTimeoutMs
+    Hard per-subagent timeout. On expiry the scheduler SIGTERMs the
+    subagent's entire process group (kill -TERM -<pgid>); SIGKILL follows
+    after 30s if no response. Emits both task.timeout (informational) and
+    task.failed (terminal, error_type: 'timeout') events.
+
+  assumeIndependentWithoutDependsOn
+    Fallback policy for plans where ZERO tasks declare depends_on. Default
+    false = run sequentially (preserves v7.10.0 semantics). Set true to opt
+    in to file-overlap inference for unannotated plans. Has no effect when
+    at least one task in the plan declares depends_on.
+
+  useDedicatedMergeWorktree
+    When true (default), the merge orchestrator cherry-picks task branches
+    inside a dedicated integration worktree at
+    .claude/worktrees/<run-ulid>/integration/ — the main repo working tree
+    is never touched. Disable only if your repo cannot afford the extra
+    worktree (rarely necessary).
+
+  allowMergeCommitsInTasks
+    When false (default), the merge orchestrator rejects task branches that
+    contain merge commits. Subagents are expected to produce a linear
+    sequence of commits on top of base_sha.
+
+  budgets.perSubagentUSD
+    HARD per-subagent cost cap. Dispatch is rejected when preFlightEstimate
+    > perSubagentUSD. An in-flight subagent is killed and emits task.failed
+    with error_type: 'budget_exceeded' if actual_cost_usd exceeds the cap
+    mid-run. Set to null to disable the per-subagent cap entirely (in which
+    case only the perRunUSD soft reservation applies).
+
+Fallback rule (single source of truth — enforced in
+src/core/concurrent-dispatch/dep-graph.ts):
+
+  1. concurrency.maxParallelSubagents: 1 → sequential dispatch.
+  2. ZERO tasks declare depends_on → sequential, unless
+     assumeIndependentWithoutDependsOn: true.
+  3. At least one task declares depends_on → use explicit deps + file-
+     overlap inference for unannotated tasks.
+
+See skills/writing-plans/SKILL.md for the depends_on annotation contract.`;
+
+/**
  * Global flags advertised in --help. These work across most verbs (per-verb
  * support varies; v6.0.1 wires them into `scan` first, additional verbs land
  * in subsequent v6.0.x point releases per docs/v6/wrapping-pipeline-phases.md).
@@ -417,6 +498,8 @@ export function buildHelpText(): string {
       }
     }
   }
+  lines.push(CONCURRENCY_CONFIG_BLOCK);
+  lines.push('');
   lines.push('Run \x1b[36mclaude-autopilot help <command>\x1b[0m for command-specific options.');
   return lines.join('\n') + '\n';
 }

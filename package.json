@@ -1,9 +1,9 @@
 {
   "name": "@delegance/claude-autopilot",
-  "version": "7.11.0-pre.5",
+  "version": "7.11.0",
   "type": "module",
   "publishConfig": {
-    "tag": "next"
+    "tag": "latest"
   },
   "description": "Autonomous development pipeline for Claude Code: brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. Multi-model, local-first, every phase a skill you can intervene in.",
   "keywords": [
@@ -52,6 +52,10 @@
     "./run-state/sameness-detector": {
       "types": "./dist/src/core/run-state/sameness-detector.d.ts",
       "default": "./dist/src/core/run-state/sameness-detector.js"
+    },
+    "./concurrent-dispatch": {
+      "types": "./dist/src/core/concurrent-dispatch/index.d.ts",
+      "default": "./dist/src/core/concurrent-dispatch/index.js"
     },
     "./bin/claude-autopilot.js": "./bin/claude-autopilot.js",
     "./bin/guardrail.js": "./bin/guardrail.js",

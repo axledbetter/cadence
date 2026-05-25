@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/claude-autopilot/presets/schemas/guardrail.config.schema.json",
+  "title": "guardrail.config.yaml",
+  "description": "Top-level shape of guardrail.config.yaml. Only blocks that are validated at config-load are listed under properties; unrecognized keys are still permitted today (additionalProperties: true) so existing presets continue to parse while new validated blocks land in subsequent releases.",
+  "type": "object",
+  "required": ["configVersion"],
+  "additionalProperties": true,
+  "properties": {
+    "configVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cost caps in USD. `perRunUSD` and `perPhaseUSD` are enforced run-wide. `perSubagentUSD` is a HARD cap per concurrent subagent — dispatch is rejected if the preflight estimate exceeds it, and a running subagent is SIGTERMed if its actual cost overruns the cap. Leave `perSubagentUSD` null/omitted to fall back to a soft `perRunUSD`-only reservation model.",
+      "properties": {
+        "perRunUSD": {
+          "type": "number",
+          "minimum": 0
+        },
+        "perPhaseUSD": {
+          "type": "number",
+          "minimum": 0
+        },
+        "perSubagentUSD": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "HARD per-subagent cost cap in USD. Dispatch is rejected when preFlightEstimate > perSubagentUSD; an in-flight subagent is killed and emits task.failed if actual_cost_usd exceeds it mid-run. Set to null to disable the per-subagent cap and rely solely on perRunUSD."
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Concurrent subagent dispatch settings (v7.11.0+). All keys are optional; defaults reproduce v7.10.0 sequential behavior for plans without depends_on annotations.",
+      "properties": {
+        "maxParallelSubagents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 3,
+          "description": "Maximum number of concurrent subagents (effective concurrency is further clamped by providerRateLimitConcurrency and taskCount). Setting to 1 reproduces v7.10.0 sequential behavior exactly. Above 8 the API rate limits dominate and additional parallelism does not help."
+        },
+        "perSubagentTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 1800000,
+          "description": "Hard timeout per subagent in milliseconds (default 30 minutes). On timeout the scheduler SIGTERMs the subagent's process group; SIGKILL follows after 30 seconds if no response."
+        },
+        "assumeIndependentWithoutDependsOn": {
+          "type": "boolean",
+          "default": false,
+          "description": "When false (default), a plan in which ZERO tasks declare depends_on is run sequentially — preserving v7.10.0 semantics. Set true to opt in to file-overlap inference for unannotated plans."
+        },
+        "useDedicatedMergeWorktree": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), the merge orchestrator cherry-picks task branches inside a dedicated integration worktree under .claude/worktrees/<run-ulid>/integration/ so the main working tree is never mutated by the autopilot run. Disable only if your repo cannot afford the extra worktree (rarely necessary)."
+        },
+        "allowMergeCommitsInTasks": {
+          "type": "boolean",
+          "default": false,
+          "description": "When false (default), the merge orchestrator rejects task branches that contain merge commits. Subagents are expected to produce a linear sequence of commits on top of base_sha."
+        }
+      }
+    }
+  }
+}
