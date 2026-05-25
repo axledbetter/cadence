@@ -100,9 +100,11 @@
   },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.97.0",
+    "cohere-ai": "^7.15.0",
     "openai": ">=4"
   },
   "devDependencies": {

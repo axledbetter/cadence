@@ -19,6 +19,16 @@ type AnthropicCtor = typeof AnthropicNS;
 type OpenAICtor = typeof OpenAINS;
 type GoogleGenerativeAICtor = typeof GoogleGenAINS;
 
+/**
+ * Minimal structural shape for @aws-sdk/client-bedrock-runtime. We type by
+ * shape (not by the SDK's exported types) so the package can be optional —
+ * users who don't use bedrock never need it installed.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type BedrockRuntimeModule = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CohereModule = any;
+
 function isModuleNotFound(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const code = (err as { code?: string }).code;
@@ -58,6 +68,27 @@ export async function loadGoogleGenerativeAI(): Promise<GoogleGenerativeAICtor> 
     return (mod as { GoogleGenerativeAI: GoogleGenerativeAICtor }).GoogleGenerativeAI;
   } catch (err) {
     if (isModuleNotFound(err)) throw missingSdkError('@google/generative-ai', 'gemini');
+    throw err;
+  }
+}
+
+export async function loadBedrockRuntime(): Promise<BedrockRuntimeModule> {
+  try {
+    const mod = await import('@aws-sdk/client-bedrock-runtime');
+    return mod;
+  } catch (err) {
+    if (isModuleNotFound(err)) throw missingSdkError('@aws-sdk/client-bedrock-runtime', 'bedrock');
+    throw err;
+  }
+}
+
+export async function loadCohere(): Promise<CohereModule> {
+  try {
+    const mod = await import('cohere-ai');
+    // cohere-ai v7+ exports `CohereClient` as named export
+    return (mod as { CohereClient?: unknown }).CohereClient ?? (mod as { default?: unknown }).default ?? mod;
+  } catch (err) {
+    if (isModuleNotFound(err)) throw missingSdkError('cohere-ai', 'cohere');
     throw err;
   }
 }

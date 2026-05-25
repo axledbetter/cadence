@@ -293,9 +293,29 @@ chunking:
 | `claude` | `ANTHROPIC_API_KEY` | Claude Opus 4.7 |
 | `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Gemini 2.5 Pro, 1M context |
 | `codex` | `OPENAI_API_KEY` | GPT-5 Codex |
-| `openai-compatible` | configurable | Groq, Ollama, Together AI, etc. |
+| `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | AWS Bedrock — Claude Sonnet 4.5 default, streaming supported. Optional `AWS_REGION` (default `us-east-1`), `AWS_SESSION_TOKEN` (STS). Install `@aws-sdk/client-bedrock-runtime`. |
+| `azure` | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT_NAME` | Azure OpenAI — deployment-routed (`/openai/deployments/{deployment}`). Default api-version `2024-10-21`. |
+| `cohere` | `COHERE_API_KEY` | Cohere `command-r-plus-08-2024` default, streaming supported. Install `cohere-ai`. |
+| `mistral` | `MISTRAL_API_KEY` | Mistral La Plateforme — `mistral-large-latest` default, streaming supported. Reuses OpenAI SDK. |
+| `openai-compatible` | configurable | Any OpenAI-API-shape provider — see [OpenAI-compatible providers](#openai-compatible-providers) below. |
 
 `auto` priority: Anthropic → Gemini → OpenAI → Groq.
+
+#### OpenAI-compatible providers
+
+The `openai-compatible` adapter speaks the standard OpenAI Chat Completions wire shape and accepts an arbitrary `baseUrl` + `apiKeyEnv`. Every provider in the table below works out of the box — pick one, paste the snippet into `guardrail.config.yaml`, and set the named env var.
+
+| Provider | `baseUrl` | `apiKeyEnv` |
+|---|---|---|
+| Together AI | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` |
+| Anyscale | `https://api.endpoints.anyscale.com/v1` | `ANYSCALE_API_KEY` |
+| Fireworks | `https://api.fireworks.ai/inference/v1` | `FIREWORKS_API_KEY` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| Perplexity | `https://api.perplexity.ai` | `PPLX_API_KEY` |
+| DeepInfra | `https://api.deepinfra.com/v1/openai` | `DEEPINFRA_API_TOKEN` |
+| Hyperbolic | `https://api.hyperbolic.xyz/v1` | `HYPERBOLIC_API_KEY` |
+| Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
+| Ollama (local) | `http://localhost:11434/v1` | n/a (no key required) |
 
 **Groq (fast/free tier):**
 ```yaml
@@ -307,6 +327,76 @@ reviewEngine:
     apiKeyEnv: GROQ_API_KEY
 ```
 
+**Together AI:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: meta-llama/Llama-3.3-70B-Instruct-Turbo
+    baseUrl: https://api.together.xyz/v1
+    apiKeyEnv: TOGETHER_API_KEY
+```
+
+**Anyscale:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: meta-llama/Meta-Llama-3-70B-Instruct
+    baseUrl: https://api.endpoints.anyscale.com/v1
+    apiKeyEnv: ANYSCALE_API_KEY
+```
+
+**Fireworks:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: accounts/fireworks/models/llama-v3p3-70b-instruct
+    baseUrl: https://api.fireworks.ai/inference/v1
+    apiKeyEnv: FIREWORKS_API_KEY
+```
+
+**OpenRouter (routes to 100+ models):**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: anthropic/claude-3.5-sonnet
+    baseUrl: https://openrouter.ai/api/v1
+    apiKeyEnv: OPENROUTER_API_KEY
+```
+
+**Perplexity:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: llama-3.1-sonar-large-128k-online
+    baseUrl: https://api.perplexity.ai
+    apiKeyEnv: PPLX_API_KEY
+```
+
+**DeepInfra:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: meta-llama/Meta-Llama-3.1-70B-Instruct
+    baseUrl: https://api.deepinfra.com/v1/openai
+    apiKeyEnv: DEEPINFRA_API_TOKEN
+```
+
+**Hyperbolic:**
+```yaml
+reviewEngine:
+  adapter: openai-compatible
+  options:
+    model: meta-llama/Meta-Llama-3.1-70B-Instruct
+    baseUrl: https://api.hyperbolic.xyz/v1
+    apiKeyEnv: HYPERBOLIC_API_KEY
+```
+
 **Ollama (local, no key):**
 ```yaml
 reviewEngine:
@@ -314,6 +404,53 @@ reviewEngine:
   options:
     model: llama3.2
     baseUrl: http://localhost:11434/v1
+```
+
+#### Direct provider adapters
+
+**AWS Bedrock:**
+```yaml
+reviewEngine:
+  adapter: bedrock
+  # Optional overrides — defaults shown:
+  # options:
+  #   model: anthropic.claude-sonnet-4-5-20250929-v1:0
+  #   region: us-east-1
+# Env: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY required.
+# Optional: AWS_REGION, AWS_SESSION_TOKEN (STS).
+# Install: npm install @aws-sdk/client-bedrock-runtime
+```
+
+**Azure OpenAI:**
+```yaml
+reviewEngine:
+  adapter: azure
+# Env: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT
+#      (e.g. https://my-resource.openai.azure.com),
+#      AZURE_OPENAI_DEPLOYMENT_NAME (deployment name, not model name).
+# Optional: AZURE_OPENAI_API_VERSION (default 2024-10-21).
+```
+
+**Cohere:**
+```yaml
+reviewEngine:
+  adapter: cohere
+  # Optional:
+  # options:
+  #   model: command-r-plus-08-2024
+# Env: COHERE_API_KEY
+# Install: npm install cohere-ai
+```
+
+**Mistral:**
+```yaml
+reviewEngine:
+  adapter: mistral
+  # Optional:
+  # options:
+  #   model: mistral-large-latest
+# Env: MISTRAL_API_KEY
+# (Reuses the OpenAI SDK — no separate install required.)
 ```
 
 ---
@@ -374,7 +511,7 @@ Four pluggable adapter points:
 
 | Point | Built-in | Purpose |
 |---|---|---|
-| `review-engine` | `auto`, `claude`, `gemini`, `codex`, `openai-compatible` | LLM review |
+| `review-engine` | `auto`, `claude`, `gemini`, `codex`, `bedrock`, `azure`, `cohere`, `mistral`, `openai-compatible` | LLM review (16+ providers — see [Review Engine Adapters](#review-engine-adapters)) |
 | `vcs-host` | `github` | PR comments + SARIF |
 | `migration-runner` | `supabase` | DB migrations |
 | `review-bot-parser` | `cursor` | Parse review bot comments |
