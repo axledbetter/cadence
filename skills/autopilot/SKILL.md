@@ -313,6 +313,43 @@ If either FAIL:
 
 If both PASS: proceed to Step 5.
 
+### Step 4.5: Classify migrations (expand/contract gate)
+
+Before applying any migration, classify every new `.sql` file added or
+modified in this PR under the configured deltas directory (default
+`data/deltas/`). For each file, run:
+
+```bash
+cadence migrate classify --file=<path>
+```
+
+Behaviour by exit code:
+
+- **`0` — safe to apply.** File is `additive`, an emergency `bypassed`,
+  or `ambiguous` with `classify=additive` / `classify=expand` pin.
+  Continue to Step 5.
+- **`1` — refuse.** File is `destructive` (no bypass) or `ambiguous`
+  pinned to `destructive` / `contract`. Surface to user:
+  > `Destructive migration detected in <file>. Required pattern: expand
+  > → deploy → contract in separate PRs. See
+  > docs/migrations/expand-contract.md. For a sanctioned Phase 4
+  > contract migration, add `-- @autopilot: classify=contract` +
+  > `contract_after=YYYY-MM-DD` + `contract_reason=<rationale>` and
+  > land it in a Phase 2 PR (dispatcher-level gate). For a true
+  > emergency only, add `-- @autopilot:
+  > classify=destructive_allowed_reason=incident=<ref> <rationale>`
+  > (must include `incident=` or `PR=` token, ≥ 10 chars) and re-run.`
+  >
+  > Halt the pipeline. Do not consume a retry.
+- **`2` — needs annotation.** File is `ambiguous` with no pin. Surface
+  to user with the same expand/contract doc reference and the
+  ambiguous statement details from the CLI JSON output. Halt.
+- **`3` — usage error.** Surface and halt.
+
+Step 4.5 is purely advisory until Phase 2 of issue #179 wires
+classification into the dispatcher pre-flight. Until then, the autopilot
+skill IS the load-bearing safety gate for autopilot users.
+
 ### Step 5: Migrate dev-only (verify SQL parses + applies)
 
 For any `.sql` files created in `data/deltas/` during implementation, run the migration against the dev database ONLY. Always invoke explicitly — do not rely on the CLI default:

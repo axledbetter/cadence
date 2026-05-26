@@ -1446,6 +1446,23 @@ switch (subcommand) {
       break;
     }
 
+    // `cadence migrate classify --file=<path>` — issue #179 Phase 1.
+    // Classifies a single SQL migration file as additive / destructive /
+    // ambiguous. Does not need stack.md or env resolution.
+    if (args[1] === 'classify') {
+      const filePath = flag('file');
+      if (!filePath) {
+        console.error('error: cadence migrate classify --file=<path> is required');
+        // Exit code 3 = usage error (reserved by the CLI's exit-code matrix;
+        // 2 is "ambiguous SQL needs annotation", 1 is "blocked").
+        process.exit(3);
+      }
+      const format = (flag('format') ?? 'json') as 'json' | 'human';
+      const { runMigrateClassify } = await import('./migrate-classify.ts');
+      const code = await runMigrateClassify({ filePath, format });
+      process.exit(code);
+    }
+
     // Plain `migrate [--env <name>] [--dry-run] [--yes]` → dispatcher.
     // v6.0.8: routed through `runMigrate` (src/cli/migrate.ts) which
     // wraps the dispatcher in a `RunPhase<MigrateInput, MigrateOutput>`
