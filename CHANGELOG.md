@@ -1,5 +1,45 @@
 ## Unreleased — v8.1.1 target
 
+### Added
+
+- **Frontend quality — Layer 1 + Layer 2 artifacts (issue #178).** Two new
+  building blocks for raising the design-quality floor on frontend code.
+  *No autopilot pipeline behavior changes in this release* — the artifacts
+  are runnable manually (audit) and human-discoverable (skill); wiring into
+  the Step 3 dispatcher and `validate.ts` Step 4 is deferred to a follow-up
+  to avoid colliding with concurrent dispatch refactors.
+
+  - `skills/frontend-impl-playbook/SKILL.md` — stack-aware implementation
+    playbook with five "REQUIRED" anchors (reuse existing primitives,
+    design tokens only, all four states by default, accessibility baseline,
+    mobile-first responsive). The playbook front-loads stack detection
+    from `package.json` / `components.json` / `tailwind.config.{ts,js}` so
+    the impl agent uses the project's primitives instead of inventing
+    shadcn-shaped components in MUI/Chakra/Mantine codebases.
+  - `scripts/audit-frontend.ts` — deterministic AST audit (no LLM cost)
+    over `*.tsx` / `*.jsx` files. Six rules, five enabled by default:
+    `forbidRawColorLiterals`, `requireAltOnImg`,
+    `requireAriaLabelOnIconButton`, `forbidInteractiveDiv`,
+    `requireLabelForInput`, and (opt-in) `forbidMagicSpacing`. Invokable
+    via `npm run audit:frontend`. Scans only files in the PR diff
+    (auto-detects base ref via `$AUTOPILOT_AUDIT_BASE` → `$GITHUB_BASE_REF`
+    → `$CI_MERGE_REQUEST_TARGET_BRANCH_NAME` → `origin/HEAD` →
+    `origin/main` → `origin/master`) or via explicit `--files=`. Exit `0`
+    clean, `1` findings, `2` infra
+    failure (config schema violation, parse diagnostic, unknown flag).
+    Out of scope for v1: `.ts`/`.js`/`.css` files, Tailwind arbitrary-value
+    class detection (`className="text-[#fff]"`), auto-fix. Document this
+    layered model in your project README — for deeper a11y coverage, pair
+    with `eslint-plugin-jsx-a11y`.
+  - `presets/schemas/frontend-quality.schema.json` — JSON schema for the
+    optional `.autopilot/frontend-quality.json` config. `additionalProperties:
+    false` at every level so config typos fail loud instead of silently
+    disabling rules.
+  - `src/core/detect/frontend-stack.ts` — `detectFrontendStack(cwd)` helper
+    used by future dispatcher/audit integrations. Detects shadcn (via the
+    `components.json` marker file), MUI, Chakra, Mantine, Ant Design,
+    Bootstrap, or plain-Tailwind ("custom"), with primitives-dir resolution.
+
 ### Changed
 
 - **Audit-log fsync policy for terminal events (issue #209).**
