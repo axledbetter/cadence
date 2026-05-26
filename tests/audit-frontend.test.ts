@@ -359,6 +359,20 @@ describe('rawColorAllowedFiles', () => {
   });
 });
 
+describe('CLI help docs env-var precedence', () => {
+  it('--help mentions env-var base precedence (Codex pass-3 remediation)', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const out = execFileSync(
+      'npx',
+      ['tsx', path.resolve(__dirname, '..', 'scripts', 'audit-frontend.ts'), '--help'],
+      { encoding: 'utf8', timeout: 30000 },
+    );
+    assert.match(out, /AUTOPILOT_AUDIT_BASE/);
+    assert.match(out, /GITHUB_BASE_REF/);
+    assert.match(out, /CI_MERGE_REQUEST_TARGET_BRANCH_NAME/);
+  });
+});
+
 describe('helpers', () => {
   it('normalizeRepoRelative rejects absolute paths', () => {
     assert.equal(normalizeRepoRelative('/etc/passwd'), null);

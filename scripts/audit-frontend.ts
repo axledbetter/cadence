@@ -183,6 +183,24 @@ function runGit(repoRoot: string, args: string[]): { status: number | null; stdo
 }
 
 function autoDetectBaseRef(repoRoot: string): string {
+  // CI-environment refs take precedence over local heuristics so the audit
+  // resolves correctly in GitHub Actions / GitLab CI / shallow clones where
+  // `origin/HEAD` may not be set up. Codex pass-3 PR review remediation.
+  // Accepted env vars (first non-empty wins):
+  //   AUTOPILOT_AUDIT_BASE — explicit override
+  //   GITHUB_BASE_REF — GitHub Actions PR base branch (e.g. "main")
+  //   CI_MERGE_REQUEST_TARGET_BRANCH_NAME — GitLab MR target branch
+  const envCandidates = ['AUTOPILOT_AUDIT_BASE', 'GITHUB_BASE_REF', 'CI_MERGE_REQUEST_TARGET_BRANCH_NAME'];
+  for (const name of envCandidates) {
+    const v = process.env[name];
+    if (v && v.trim().length > 0) {
+      const bare = v.trim();
+      // Prefer origin/<branch> when available (matches the local heuristic).
+      const probe = runGit(repoRoot, ['rev-parse', '--verify', `origin/${bare}`]);
+      if (probe.status === 0) return `origin/${bare}`;
+      return bare;
+    }
+  }
   const head = runGit(repoRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD']);
   if (head.status === 0) {
     const ref = head.stdout.trim();
@@ -193,7 +211,9 @@ function autoDetectBaseRef(repoRoot: string): string {
   const master = runGit(repoRoot, ['rev-parse', '--verify', 'origin/master']);
   if (master.status === 0) return 'origin/master';
   throw new GitResolveError(
-    'Could not auto-detect base ref (no origin/HEAD, origin/main, or origin/master).\n' +
+    'Could not auto-detect base ref. Tried (in order):\n' +
+    '  $AUTOPILOT_AUDIT_BASE, $GITHUB_BASE_REF, $CI_MERGE_REQUEST_TARGET_BRANCH_NAME,\n' +
+    '  origin/HEAD, origin/main, origin/master.\n' +
     '  Pass --base=<ref> or --files=<comma-separated> explicitly.',
   );
 }
@@ -686,10 +706,16 @@ Usage:
   audit-frontend [--base=<ref>] [--files=a.tsx,b.tsx] [--include-notes] [--allow-parse-failures]
 
 Flags:
-  --base=<ref>             diff base (default: auto-detect origin/HEAD → origin/main → origin/master)
+  --base=<ref>             diff base (default: auto-detect — see below)
   --files=<a,b,c>          audit explicit files (bypasses git)
   --include-notes          print NOTE-severity findings (e.g. alt="" decorative review)
   --allow-parse-failures   downgrade parse failures to warnings instead of exit 2
+
+Base auto-detection order (first non-empty wins):
+  $AUTOPILOT_AUDIT_BASE  — explicit override
+  $GITHUB_BASE_REF       — GitHub Actions PR base
+  $CI_MERGE_REQUEST_TARGET_BRANCH_NAME — GitLab MR target
+  origin/HEAD → origin/main → origin/master
 
 Scope (v1): only *.tsx and *.jsx files. .ts/.js/.css/.scss are out of scope.
 Config: <repo-root>/.autopilot/frontend-quality.json (schema at presets/schemas/).

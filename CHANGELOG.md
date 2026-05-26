@@ -22,8 +22,10 @@
     `requireAriaLabelOnIconButton`, `forbidInteractiveDiv`,
     `requireLabelForInput`, and (opt-in) `forbidMagicSpacing`. Invokable
     via `npm run audit:frontend`. Scans only files in the PR diff
-    (auto-detects base ref via `origin/HEAD → origin/main → origin/master`)
-    or via explicit `--files=`. Exit `0` clean, `1` findings, `2` infra
+    (auto-detects base ref via `$AUTOPILOT_AUDIT_BASE` → `$GITHUB_BASE_REF`
+    → `$CI_MERGE_REQUEST_TARGET_BRANCH_NAME` → `origin/HEAD` →
+    `origin/main` → `origin/master`) or via explicit `--files=`. Exit `0`
+    clean, `1` findings, `2` infra
     failure (config schema violation, parse diagnostic, unknown flag).
     Out of scope for v1: `.ts`/`.js`/`.css` files, Tailwind arbitrary-value
     class detection (`className="text-[#fff]"`), auto-fix. Document this
