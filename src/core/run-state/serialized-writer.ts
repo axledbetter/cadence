@@ -80,6 +80,7 @@ import { updateLockSeq } from './lock.ts';
 import { readMaxSeq } from './events.ts';
 import {
   RUN_STATE_SCHEMA_VERSION,
+  TERMINAL_TASK_EVENT_KIND_SET,
   type RunEvent,
   type RunEventInput,
   type WriterId,
@@ -87,6 +88,30 @@ import {
 
 /** Sibling path suffix for the writer's exclusive lock. */
 const WRITER_LOCK_SUFFIX = '.writer.lock';
+
+/** v8.1.1 — fsync durability policy for `events.ndjson`. Trade-off between
+ *  crash safety and append throughput.
+ *
+ *   * `'never'`  — never fsync. Matches v7.11.0 behaviour (`O_APPEND` is
+ *                  byte-atomic at the kernel but the tail of the file may
+ *                  be lost on host crash). Highest throughput.
+ *   * `'terminal'` (DEFAULT, v8.1.1) — fsync after writing any of the
+ *                  terminal task events listed in
+ *                  `TERMINAL_TASK_EVENT_KINDS`. State-transition records
+ *                  (completed / failed / merged / timeout / budget_halt)
+ *                  are durable on host crash; informational events
+ *                  (started / budget_reserved / budget_released) may be
+ *                  lost but their state is reconstructible from the next
+ *                  terminal record. Bounded perf cost: ~1 fsync per task,
+ *                  not per event.
+ *   * `'always'` — fsync after EVERY event. Highest correctness, lowest
+ *                  throughput. Use when even informational tail loss is
+ *                  unacceptable (e.g. cost audit).
+ *
+ *  Closes issue #209 (codex pass 2 finding on v7.11.0 PR #208). */
+export type Durability = 'never' | 'terminal' | 'always';
+
+const DEFAULT_DURABILITY: Durability = 'terminal';
 
 /** Default poll interval / max attempts when the lock is contended. The
  *  serialized writer is in-process most of the time, so contention is
@@ -109,6 +134,15 @@ export interface SerializedWriterOptions {
   pollIntervalMs?: number;
   /** Max retry attempts when blocking on lock. Default 240_000. */
   maxBlockingAttempts?: number;
+  /** v8.1.1 — fsync policy. Default `'terminal'` (fsync on task-terminal
+   *  events only — see {@link Durability}). Issue #209. */
+  durability?: Durability;
+  /** v8.1.1 — INTERNAL test seam. Wraps `fs.fsyncSync` so tests can
+   *  observe fsync calls without monkey-patching the frozen `node:fs`
+   *  ESM namespace (which throws "Cannot redefine property"). Production
+   *  callers MUST leave this undefined — the default is the real
+   *  `fs.fsyncSync`. */
+  __fsyncSyncImpl?: (fd: number) => void;
 }
 
 /**
@@ -135,9 +169,12 @@ export interface SerializedWriterOptions {
 export class SerializedWriter {
   private fd: number | null = null;
   private closed = false;
-  private readonly opts: Required<Omit<SerializedWriterOptions, 'runId'>> & {
+  private readonly opts: Required<Omit<SerializedWriterOptions, 'runId' | '__fsyncSyncImpl'>> & {
     runId?: string;
+    durability: Durability;
   };
+  /** Test seam — see {@link SerializedWriterOptions.__fsyncSyncImpl}. */
+  private readonly fsyncSync: (fd: number) => void;
 
   private constructor(opts: SerializedWriterOptions) {
     this.opts = {
@@ -147,7 +184,9 @@ export class SerializedWriter {
       runId: opts.runId,
       pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_MS,
       maxBlockingAttempts: opts.maxBlockingAttempts ?? DEFAULT_MAX_ATTEMPTS,
+      durability: opts.durability ?? DEFAULT_DURABILITY,
     };
+    this.fsyncSync = opts.__fsyncSyncImpl ?? fs.fsyncSync;
   }
 
   /** Construct a writer and prime the file descriptor. The events file and
@@ -281,7 +320,22 @@ export class SerializedWriter {
     // atomic at the kernel boundary. Our events fit well under that.
     const buf = Buffer.from(JSON.stringify(fullEvent) + '\n', 'utf8');
     fs.writeSync(this.fd, buf, 0, buf.length);
-    fs.fsyncSync(this.fd);
+
+    // v8.1.1 — durability policy. `'never'` skips the fsync entirely
+    // (v7.11.0 behaviour — fastest, may lose tail on host crash).
+    // `'terminal'` (default) fsyncs only after state-transition events.
+    // `'always'` fsyncs every event. The fsync MUST happen BEFORE the
+    // lock is released (handled by `withLock`'s try/finally) so the
+    // next acquirer sees the kernel-flushed state. Issue #209.
+    const eventKind = (fullEvent as { event?: string }).event;
+    const shouldFsync =
+      this.opts.durability === 'always' ||
+      (this.opts.durability === 'terminal' &&
+        typeof eventKind === 'string' &&
+        TERMINAL_TASK_EVENT_KIND_SET.has(eventKind));
+    if (shouldFsync) {
+      this.fsyncSync(this.fd);
+    }
 
     // Best-effort seq sidecar + lock-seq advance. These mirror what
     // `appendEvent` in events.ts does so the rest of the run-state engine

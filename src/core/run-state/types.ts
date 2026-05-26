@@ -518,6 +518,40 @@ export type RunEventInput = DistributiveOmit<
   'seq' | 'ts' | 'runId' | 'schema_version' | 'writerId'
 >;
 
+/** v8.1.1 — events whose loss after a crash would corrupt the resume /
+ *  reconciliation engine. The serialized writer fsyncs the events file
+ *  AFTER appending any of these (default `durability: 'terminal'` mode) so
+ *  the kernel-side write actually hits disk before the lock is released.
+ *
+ *  Why this exact set?
+ *
+ *   * `task.completed` / `task.failed` / `task.timeout` — terminal exit
+ *     records. Loss makes resume think the task is still in-flight.
+ *   * `task.merged` / `task.merge_conflict` / `task.merge_aborted` — merge
+ *     orchestrator state transitions. Loss makes the next merge attempt
+ *     compute the wrong precondition (HEAD-after-merge) or skip conflict
+ *     resolution.
+ *   * `task.budget_halt` — terminal record for the budget ledger. Loss
+ *     would let a halted task be resurrected on resume.
+ *
+ *  Issue #209. Spec: v7.11.0 PR6 codex pass 2 follow-up. */
+export const TERMINAL_TASK_EVENT_KINDS = [
+  'task.completed',
+  'task.failed',
+  'task.merged',
+  'task.merge_conflict',
+  'task.merge_aborted',
+  'task.timeout',
+  'task.budget_halt',
+] as const;
+
+/** Set form for O(1) membership checks in the writer's hot path. */
+export const TERMINAL_TASK_EVENT_KIND_SET: ReadonlySet<string> = new Set(
+  TERMINAL_TASK_EVENT_KINDS,
+);
+
+export type TerminalTaskEventKind = (typeof TERMINAL_TASK_EVENT_KINDS)[number];
+
 // ----------------------------------------------------------------------------
 // Top-level index entry (rebuildable cache). Mirrors what `runs list` will
 // surface. Persisted at `.guardrail-cache/runs/index.json`.

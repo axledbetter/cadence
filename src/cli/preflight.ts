@@ -2,10 +2,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as yaml from 'js-yaml';
 import { runSafe } from '../core/shell.ts';
 import { detectLLMKey, loadEnvFile, LLM_KEY_NAMES } from '../core/detect/llm-key.ts';
 import { findPackageRoot } from './_pkg-root.ts';
 import { isSdkInstalled } from '../adapters/sdk-loader.ts';
+import { findUnknownBudgetKeys, formatBudgetWarnings } from '../core/config/loader.ts';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -184,6 +186,29 @@ export async function runDoctor(): Promise<DoctorResult> {
       ? 'guardrail.config.yaml not found in current directory — copy from a preset: presets/nextjs-supabase/guardrail.config.yaml'
       : undefined,
   });
+
+  // 4b. budgets.* unknown-key scan (v8.1.1, issue #210). Reads the YAML
+  //     without invoking the full loader so doctor can still surface a
+  //     typo even when the schema would reject the file outright. The
+  //     loader's own pre-validation `console.warn` covers `cadence run`
+  //     etc.; this surfaces the same warning prominently inside doctor.
+  if (fs.existsSync(configYaml)) {
+    let unknownKeys: ReturnType<typeof findUnknownBudgetKeys> = [];
+    try {
+      const parsed = yaml.load(fs.readFileSync(configYaml, 'utf8'));
+      unknownKeys = findUnknownBudgetKeys(parsed);
+    } catch {
+      // Malformed YAML — let other tooling surface the parse error.
+    }
+    if (unknownKeys.length > 0) {
+      const lines = formatBudgetWarnings(unknownKeys);
+      checks.push({
+        name: `budgets unknown key${unknownKeys.length > 1 ? 's' : ''} (${unknownKeys.length})`,
+        result: 'warn',
+        message: lines.join('\n       '),
+      });
+    }
+  }
 
   // 5. Local env file exists
   const envFile = ENV_CANDIDATES.find(f => fs.existsSync(f));

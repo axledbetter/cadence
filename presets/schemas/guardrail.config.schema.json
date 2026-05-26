@@ -13,21 +13,28 @@
     },
     "budgets": {
       "type": "object",
-      "additionalProperties": true,
-      "description": "Cost caps in USD. `perRunUSD` and `perPhaseUSD` are enforced run-wide. `perSubagentUSD` is a HARD cap per concurrent subagent — dispatch is rejected if the preflight estimate exceeds it, and a running subagent is SIGTERMed if its actual cost overruns the cap. Leave `perSubagentUSD` null/omitted to fall back to a soft `perRunUSD`-only reservation model. additionalProperties is intentionally `true` in v7.11.0 for backwards-compatibility with existing user configs that may carry historical budget keys; a future minor will enumerate the full set and tighten this to `false`.",
+      "additionalProperties": false,
+      "description": "Cost caps in USD. `perRunUSD` and `perPhaseUSD` are enforced run-wide. `perSubagentUSD` is a HARD cap per concurrent subagent — dispatch is rejected if the preflight estimate exceeds it, and a running subagent is SIGTERMed if its actual cost overruns the cap. Leave `perSubagentUSD` null/omitted to fall back to a soft `perRunUSD`-only reservation model. v8.1.1 tightened `additionalProperties` to `false` (was `true` in v7.11.0 for backwards-compat) so that case typos like `perSubAgentUsd` fail schema validation instead of silently disabling the per-subagent cap. The config loader also emits a `console.warn` for any unknown `budgets.*` keys BEFORE schema validation, which surfaces in `cadence doctor` so the source of the typo is easy to spot. Issue #210.",
       "properties": {
         "perRunUSD": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Hard ceiling on total committed spend (sum of actual cost + active reservations) across the whole run. Hit this cap and dispatch is halted — the next reservation emits `task.budget_halt` and the scheduler stops accepting new tasks."
         },
         "perPhaseUSD": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Per-phase soft cap (USD). Layer-1 budget guard (`checkPhaseBudget`) compares the phase's high-end estimate against this value and emits `budget.check` with decision `pause` when exceeded. Use to flag expensive phases for human review without halting the run."
         },
         "perSubagentUSD": {
           "type": ["number", "null"],
           "minimum": 0,
           "description": "HARD per-subagent cost cap in USD. Dispatch is rejected when preFlightEstimate > perSubagentUSD; an in-flight subagent is killed and emits task.failed if actual_cost_usd exceeds it mid-run. Set to null to disable the per-subagent cap and rely solely on perRunUSD."
+        },
+        "conservativePhaseReserveUSD": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional Layer-2 floor (USD) applied per-phase when the phase doesn't implement `estimateCost`. Documented in `runs-watch.ts` extractBudget. Leave unset to use the engine default."
         }
       }
     },

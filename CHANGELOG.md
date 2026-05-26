@@ -1,3 +1,58 @@
+## Unreleased — v8.1.1 target
+
+### Changed
+
+- **Audit-log fsync policy for terminal events (issue #209).**
+  `SerializedWriter` now accepts a `durability: 'never' | 'terminal' |
+  'always'` option, defaulting to `'terminal'`. State-transition events
+  (`task.completed`, `task.failed`, `task.merged`, `task.merge_conflict`,
+  `task.merge_aborted`, `task.timeout`, `task.budget_halt`) are fsync'd
+  to disk before the writer's exclusive lock is released, so a host
+  crash after the kernel-side append cannot lose the tail event that
+  resume + reconciliation depend on. Informational events
+  (`task.started`, `task.budget_reserved`, `task.budget_released`,
+  `task.budget_increased_reservation`) skip the fsync by default —
+  their state can be reconstructed from the next terminal record. The
+  v7.11.0 unconditional-fsync behavior is available as
+  `durability: 'always'`; the v7.11.0-CHANGELOG-documented "never
+  fsync" baseline is available as `durability: 'never'` for users
+  prioritizing throughput over crash safety.
+- **Terminal-event constant** — new exported
+  `TERMINAL_TASK_EVENT_KINDS` in `src/core/run-state/types.ts`. Adding
+  a new terminal task event MUST update this constant; the writer's
+  conditional fsync, the run-state replay, and the test snapshot all
+  key off it.
+
+- **`budgets.*` schema enumeration + typo warning (issue #210).**
+  `presets/schemas/guardrail.config.schema.json` and the runtime
+  `GUARDRAIL_CONFIG_SCHEMA` enumerate every known budget key
+  (`perRunUSD`, `perPhaseUSD`, `perSubagentUSD`,
+  `conservativePhaseReserveUSD`) and tighten `additionalProperties` to
+  `false`. Case typos like `perSubAgentUsd` and renamed keys like
+  `perSubagentBudget` now FAIL schema validation instead of silently
+  disabling the per-subagent cap. The loader also emits a
+  `console.warn` BEFORE schema validation that names the offending key
+  and suggests the recognized spelling via case-insensitive nearest-key
+  match. `cadence doctor` surfaces the same warning prominently — it
+  parses `guardrail.config.yaml` independently of the full loader so
+  the typo is visible even when the schema rejects the file outright.
+
+### Performance
+
+- The default `'terminal'` durability adds one `fsync` per
+  state-transition record — bounded at ~1 per task (start/reserve are
+  informational; complete/fail/merge/timeout/budget-halt are terminal).
+  Throughput impact at typical concurrency (3 subagents × ~5 terminal
+  events each per run) is < 50 ms aggregate on modern SSDs. Users
+  willing to trade durability for throughput can opt back into the
+  v7.11.0 behavior with `durability: 'never'`.
+
+### Notes
+
+- **No version bump in this PR** — the v8.1.1 patch is named at
+  merge-time. The parallel v8.2.0 PR1 (profile schema + resolver)
+  ships concurrently and lands in either order.
+
 ## Unreleased — v8.1.0 target
 
 ### Added
