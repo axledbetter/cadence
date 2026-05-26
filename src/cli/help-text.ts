@@ -481,8 +481,9 @@ User-type profile (v8.2.0 PR1 ships schema + resolver only — flag NOT YET wire
                          enterprise, learning) with precedence
                          .autopilot/profile < CLAUDE_AUTOPILOT_PROFILE env < flag.
                          Default is solo (behavioral parity with v7.10.1).
-                         Until PR2 lands, passing this flag is a no-op (the
-                         dispatcher will treat it as an unknown argument).`;
+                         Until PR2 lands, passing this flag may fail as an
+                         unknown-argument CLI parser error. Set the profile via
+                         .autopilot/profile or CLAUDE_AUTOPILOT_PROFILE instead.`;
 
 /** Build the full two-level help text. Returned as a string so tests can assert against it without spawning. */
 export function buildHelpText(): string {
