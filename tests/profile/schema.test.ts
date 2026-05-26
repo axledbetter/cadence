@@ -156,6 +156,30 @@ describe('profile.schema.json — synthetic invalid', () => {
     assert.equal(validate(doc), false);
   });
 
+  // bugbot MEDIUM — schema previously allowed `C:/...` Windows absolute
+  // paths despite the description saying "repo-relative". Verify the
+  // tightened regex rejects all common absolute / UNC / backslash cases.
+  for (const evil of ['C:/outside/audit/', 'C:\\Windows\\Temp\\', '\\\\server\\share\\', 'audit\\subdir']) {
+    it(`rejects audit_log_path platform-absolute / UNC: ${JSON.stringify(evil)}`, () => {
+      const doc = {
+        profile: 'test',
+        description: 'evil',
+        codex_passes: { low: 0, medium: 0, high: 0 },
+        audit_log_path: evil,
+      };
+      assert.equal(validate(doc), false);
+    });
+    it(`rejects pr_template_path platform-absolute / UNC: ${JSON.stringify(evil)}`, () => {
+      const doc = {
+        profile: 'test',
+        description: 'evil',
+        codex_passes: { low: 0, medium: 0, high: 0 },
+        pr_template_path: evil,
+      };
+      assert.equal(validate(doc), false);
+    });
+  }
+
   it('rejects pr_template_path with `..` escape', () => {
     const doc = {
       profile: 'test',

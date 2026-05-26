@@ -68,8 +68,8 @@
     "audit_log_path": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Relative DIRECTORY inside the repo (not a file path) where append-only audit logs are written as `<audit_log_path>/<run-ulid>.jsonl`. The resolver / consumer is responsible for joining the run-ulid filename — the value here names the parent directory only (e.g. `.claude/audit/`). `null` disables audit logging. When non-null, must be a relative path (no leading `/`) and must not contain `..` segments — both prevent escaping the repo root. Per-run filename is fixed by the consumer to keep ULID monotonic ordering.",
-      "pattern": "^(?!/)(?!.*\\.\\.).+$"
+      "description": "Relative DIRECTORY inside the repo (not a file path) where append-only audit logs are written as `<audit_log_path>/<run-ulid>.jsonl`. The resolver / consumer is responsible for joining the run-ulid filename — the value here names the parent directory only (e.g. `.claude/audit/`). `null` disables audit logging. Must be a POSIX-style relative path: no leading `/` (POSIX absolute), no leading drive letter `C:` (Windows absolute), no leading `\\\\` (UNC), no backslashes, and no `..` segments. The consumer pins the per-run filename to keep ULID monotonic ordering.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
     },
     "codex_explanations": {
       "type": "boolean",
@@ -79,8 +79,8 @@
     "pr_template_path": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Package-root-relative path to a PR-body Markdown template (e.g. `presets/profiles/templates/small-team-pr-template.md`). `null` falls back to the built-in default PR template. When non-null, must be a relative path (no leading `/`) and must not contain `..` segments.",
-      "pattern": "^(?!/)(?!.*\\.\\.).+$"
+      "description": "Package-root-relative path to a PR-body Markdown template (e.g. `presets/profiles/templates/small-team-pr-template.md`). `null` falls back to the built-in default PR template. Must be a POSIX-style relative path: no leading `/` (POSIX absolute), no leading drive letter `C:` (Windows absolute), no leading `\\\\` (UNC), no backslashes, and no `..` segments.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
     },
     "contributor_policy": {
       "type": ["object", "null"],

@@ -130,6 +130,40 @@ describe('resolveProfile — precedence (file < env < flag)', () => {
     assert.equal(r.name, 'small-team');
     fs.rmSync(cwd, { recursive: true, force: true });
   });
+
+  it('flag overrides a broken .autopilot/profile (bugbot MEDIUM)', () => {
+    // Without the reverse-precedence walk, a malformed file would
+    // throw before we ever looked at the flag, blocking the user's
+    // emergency override.
+    const cwd = mkTempCwd();
+    writeProfileFile(cwd, 'enterprise\nsolo\n'); // two lines: rejected
+    const r = resolveProfile({ cwd, flagProfile: 'small-team' });
+    assert.equal(r.name, 'small-team');
+    assert.equal(r.source, 'flag');
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('env overrides a broken .autopilot/profile (bugbot MEDIUM)', () => {
+    const cwd = mkTempCwd();
+    writeProfileFile(cwd, 'enter prise\n'); // embedded ws: rejected
+    const r = resolveProfile({ cwd, envProfile: 'learning' });
+    assert.equal(r.name, 'learning');
+    assert.equal(r.source, 'env');
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('broken file alone (no flag/env) still raises', () => {
+    const cwd = mkTempCwd();
+    writeProfileFile(cwd, 'enterprise\nsolo\n');
+    assert.throws(
+      () => resolveProfile({ cwd }),
+      (err: ProfileResolutionError) => {
+        assert.equal(err.code, 'parse_error');
+        return true;
+      },
+    );
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
 });
 
 describe('resolveProfile — path-safety (file source)', () => {

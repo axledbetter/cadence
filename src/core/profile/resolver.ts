@@ -48,14 +48,16 @@ const PROFILE_NAME_REGEX = /^[a-z0-9][a-z0-9-]*$/;
 const DEFAULT_PROFILE_NAME = 'solo';
 const ENV_VAR_NAME = 'CLAUDE_AUTOPILOT_PROFILE';
 
-// Lazy-loaded singleton — schema + validator share a compiled instance
-// across calls. Reset to null when the package root can't be found so a
-// subsequent retry (e.g. install completes) can pick it up.
-let _ajv: Ajv | null = null;
-let _validate: ReturnType<Ajv['compile']> | null = null;
+// Lazy-loaded validator cache — keyed by package root so multiple roots
+// in one process (tests with synthetic roots, embedding in a daemon
+// that resolves multiple package installs) don't cross-contaminate
+// (bugbot, low severity). Production callers will hit the same cache
+// entry every time since findPackageRoot() returns a stable path.
+const _validatorCache = new Map<string, ReturnType<Ajv['compile']>>();
 
 function getValidator(packageRoot: string): ReturnType<Ajv['compile']> {
-  if (_validate) return _validate;
+  const cached = _validatorCache.get(packageRoot);
+  if (cached) return cached;
   const schemaPath = path.join(packageRoot, 'presets', 'schemas', 'profile.schema.json');
   let schemaJson: unknown;
   try {
@@ -70,18 +72,18 @@ function getValidator(packageRoot: string): ReturnType<Ajv['compile']> {
       },
     );
   }
-  _ajv = new Ajv({ allErrors: true, strict: false });
-  _validate = _ajv.compile(schemaJson as object);
-  return _validate;
+  const ajv = new Ajv({ allErrors: true, strict: false });
+  const compiled = ajv.compile(schemaJson as object);
+  _validatorCache.set(packageRoot, compiled);
+  return compiled;
 }
 
 /**
- * Test-only: reset the cached Ajv instance + validator. Required so tests
- * that point the resolver at synthetic package roots get a fresh schema.
+ * Test-only: clear the per-packageRoot validator cache. Required so
+ * tests that swap synthetic package roots get a fresh schema.
  */
 export function _resetSchemaCache(): void {
-  _ajv = null;
-  _validate = null;
+  _validatorCache.clear();
 }
 
 function resolvePackageRoot(): string {
@@ -349,48 +351,20 @@ export function resolveProfile(opts: ResolveProfileOptions): ResolvedProfile {
   let candidate: string | null = null;
   let source: ProfileResolutionSource = 'default';
 
-  // Layer 1: repo file.
-  const profileFilePath = path.join(opts.cwd, '.autopilot', 'profile');
-  if (fs.existsSync(profileFilePath)) {
-    let raw: string;
-    try {
-      raw = fs.readFileSync(profileFilePath, 'utf8');
-    } catch (err) {
-      // Filesystem-level failure (EACCES, EIO, transient mount issue) —
-      // NOT a content / parse problem. Bucket as `unknown` so doctor
-      // messaging and downstream branches don't suggest "fix your
-      // profile file's syntax" when the actual issue is permissions
-      // (bugbot, low severity).
-      throw new ProfileResolutionError(
-        `Failed to read ${profileFilePath}`,
-        {
-          code: 'unknown',
-          source: 'file',
-          hint: `Check file permissions on .autopilot/profile, or delete the file to fall back to the env/flag/default chain.`,
-          details: { cause: err instanceof Error ? err.message : String(err) },
-        },
-      );
-    }
-    const parsed = parseProfileFile(raw);
-    if (parsed !== null) {
-      candidate = parsed;
-      source = 'file';
-    }
-  }
+  // Resolve in REVERSE precedence order so a higher layer short-circuits
+  // before we ever parse a lower layer. This matters because
+  // `.autopilot/profile` parse errors are HARD failures — if we parsed
+  // the file first, a broken file would block a user's emergency
+  // `--profile solo` escape hatch (bugbot, medium severity: "Invalid
+  // file blocks flag override"). End-to-end precedence is still
+  // file < env < flag.
 
-  // Layer 2: env var. Empty / whitespace-only env values fall through.
-  const envValue = opts.envProfile;
-  if (envValue !== undefined && envValue.trim().length > 0) {
-    candidate = envValue.trim();
-    source = 'env';
-  }
-
-  // Layer 3: CLI flag. Empty flag value is explicitly rejected — passing
-  // `--profile ""` is a user mistake, not an "unset" signal. We use the
-  // `parse_error` code (not `path_traversal`) because an empty string
-  // isn't a traversal attempt; it's a malformed CLI argument that a
-  // downstream "wrong-remediation" branch (bugbot, low severity) should
-  // distinguish from `../solo`-style attacks.
+  // Layer 3 (highest): CLI flag. Empty flag value is explicitly rejected
+  // — passing `--profile ""` is a user mistake, not an "unset" signal.
+  // We use the `parse_error` code (not `path_traversal`) because an
+  // empty string isn't a traversal attempt; it's a malformed CLI
+  // argument that a downstream "wrong-remediation" branch (bugbot, low
+  // severity) should distinguish from `../solo`-style attacks.
   const flagValue = opts.flagProfile;
   if (flagValue !== undefined) {
     if (flagValue.trim().length === 0) {
@@ -405,6 +379,48 @@ export function resolveProfile(opts: ResolveProfileOptions): ResolvedProfile {
     }
     candidate = flagValue.trim();
     source = 'flag';
+  }
+
+  // Layer 2: env var. Empty / whitespace-only env values fall through.
+  if (candidate === null) {
+    const envValue = opts.envProfile;
+    if (envValue !== undefined && envValue.trim().length > 0) {
+      candidate = envValue.trim();
+      source = 'env';
+    }
+  }
+
+  // Layer 1 (lowest): repo file. Only consumed when neither flag nor
+  // env won. A higher-layer winner means we never touch the file, so a
+  // broken `.autopilot/profile` doesn't block emergency overrides.
+  if (candidate === null) {
+    const profileFilePath = path.join(opts.cwd, '.autopilot', 'profile');
+    if (fs.existsSync(profileFilePath)) {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(profileFilePath, 'utf8');
+      } catch (err) {
+        // Filesystem-level failure (EACCES, EIO, transient mount
+        // issue) — NOT a content / parse problem. Bucket as `unknown`
+        // so doctor messaging and downstream branches don't suggest
+        // "fix your profile file's syntax" when the actual issue is
+        // permissions (bugbot, low severity).
+        throw new ProfileResolutionError(
+          `Failed to read ${profileFilePath}`,
+          {
+            code: 'unknown',
+            source: 'file',
+            hint: `Check file permissions on .autopilot/profile, or delete the file to fall back to the env/flag/default chain.`,
+            details: { cause: err instanceof Error ? err.message : String(err) },
+          },
+        );
+      }
+      const parsed = parseProfileFile(raw);
+      if (parsed !== null) {
+        candidate = parsed;
+        source = 'file';
+      }
+    }
   }
 
   // Fall back to the shipped default if every layer was unset.
