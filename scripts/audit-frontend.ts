@@ -551,6 +551,62 @@ function checkInteractiveDiv(
   visit(sf);
 }
 
+// Spacing-related CSS keys that conventionally use a token scale (multiples
+// of 4px in Tailwind / 8px in some other systems). We flag a value when it's
+// an EXPLICIT pixel literal AND its numeric magnitude is not a multiple of 4
+// AND it's >0 (zero is always fine). Keys deliberately narrow — covers the
+// common offenders without spurious flags on border widths or font sizes.
+const SPACING_PROPS = new Set([
+  'padding', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
+  'paddingInline', 'paddingBlock',
+  'margin', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight',
+  'marginInline', 'marginBlock',
+  'gap', 'rowGap', 'columnGap',
+  'top', 'bottom', 'left', 'right',
+]);
+
+const PIXEL_VALUE_REGEX = /^(\d+(?:\.\d+)?)\s*px$/;
+
+function checkMagicSpacing(
+  sf: ts.SourceFile,
+  filePath: string,
+  cfg: ResolvedConfig,
+  findings: Finding[],
+): void {
+  if (!cfg.rules.forbidMagicSpacing) return;
+  function visit(node: ts.Node): void {
+    if (ts.isJsxAttribute(node) && node.name && ts.isIdentifier(node.name) && node.name.text === 'style') {
+      const init = node.initializer;
+      if (init && ts.isJsxExpression(init) && init.expression && ts.isObjectLiteralExpression(init.expression)) {
+        for (const prop of init.expression.properties) {
+          if (!ts.isPropertyAssignment(prop)) continue;
+          const key = prop.name;
+          const keyName = ts.isIdentifier(key) ? key.text : ts.isStringLiteral(key) ? key.text : '';
+          if (!SPACING_PROPS.has(keyName)) continue;
+          const v = prop.initializer;
+          if (!(ts.isStringLiteral(v) || ts.isNoSubstitutionTemplateLiteral(v))) continue;
+          const m = PIXEL_VALUE_REGEX.exec(v.text);
+          if (!m) continue;
+          const px = parseFloat(m[1]!);
+          if (px > 0 && px % 4 !== 0) {
+            const { line, col } = lineColFromPos(sf, v.getStart(sf));
+            findings.push({
+              file: filePath,
+              line,
+              col,
+              rule: 'forbidMagicSpacing',
+              severity: 'error',
+              message: `${keyName}: "${v.text}" — not on the design scale (multiple of 4px); use a token instead`,
+            });
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sf);
+}
+
 const INPUT_TAGS = new Set(['input', 'textarea', 'select', 'Input', 'Textarea', 'Select']);
 
 function collectLabelHtmlForsInSubtree(node: ts.Node): Set<string> {
@@ -671,6 +727,7 @@ export function auditSource(
   checkAriaLabelOnIconButton(sf, filePath, cfg, findings);
   checkInteractiveDiv(sf, filePath, cfg, findings);
   checkLabelForInput(sf, filePath, cfg, findings);
+  checkMagicSpacing(sf, filePath, cfg, findings);
   return findings;
 }
 
@@ -781,7 +838,19 @@ export function main(argv: string[]): number {
   const auditable = afterIgnore.filter(isAuditableExt);
 
   if (auditable.length === 0) {
-    process.stdout.write('[audit-frontend] OK — no auditable *.{tsx,jsx} files in scope\n');
+    // Per the exit-code contract: caller error → exit 2. If the user passed
+    // --files= explicitly but none matched, this is a typo / misuse and
+    // CI should fail rather than treat it as a clean audit. Diff-mode with
+    // no FE files in the PR is the genuine "nothing to do" case and exits 0.
+    if (args.files) {
+      process.stderr.write(
+        `[audit-frontend] --files= produced 0 auditable *.{tsx,jsx} files after ignorePaths.\n` +
+        `  Input: ${args.files.join(', ')}\n` +
+        `  Either remove the misspelled paths or scope to .tsx/.jsx files.\n`,
+      );
+      return 2;
+    }
+    process.stdout.write('[audit-frontend] OK — no auditable *.{tsx,jsx} files in PR diff\n');
     return 0;
   }
 

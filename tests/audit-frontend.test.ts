@@ -342,6 +342,47 @@ describe('config loading', () => {
   });
 });
 
+describe('forbidMagicSpacing (opt-in)', () => {
+  it('flags padding: "17px" when rule enabled', () => {
+    const f = audit(
+      `export const X = () => <div style={{ padding: '17px' }} />;`,
+      { rules: { forbidMagicSpacing: true } },
+    );
+    const errs = f.filter((x) => x.rule === 'forbidMagicSpacing');
+    assert.equal(errs.length, 1);
+    assert.match(errs[0]!.message, /17px/);
+  });
+
+  it('does not flag padding: "16px" (multiple of 4)', () => {
+    const f = audit(
+      `export const X = () => <div style={{ padding: '16px' }} />;`,
+      { rules: { forbidMagicSpacing: true } },
+    );
+    assert.equal(f.filter((x) => x.rule === 'forbidMagicSpacing').length, 0);
+  });
+
+  it('does not flag padding: "0px"', () => {
+    const f = audit(
+      `export const X = () => <div style={{ padding: '0px' }} />;`,
+      { rules: { forbidMagicSpacing: true } },
+    );
+    assert.equal(f.filter((x) => x.rule === 'forbidMagicSpacing').length, 0);
+  });
+
+  it('is OFF by default (does not fire without explicit enable)', () => {
+    const f = audit(`export const X = () => <div style={{ padding: '17px' }} />;`);
+    assert.equal(f.filter((x) => x.rule === 'forbidMagicSpacing').length, 0);
+  });
+
+  it('ignores non-spacing keys', () => {
+    const f = audit(
+      `export const X = () => <div style={{ fontSize: '17px' }} />;`,
+      { rules: { forbidMagicSpacing: true } },
+    );
+    assert.equal(f.filter((x) => x.rule === 'forbidMagicSpacing').length, 0);
+  });
+});
+
 describe('rawColorAllowedFiles', () => {
   it('exempts matching file from forbidRawColorLiterals only', () => {
     const cfg = { rawColorAllowedFiles: ['app/components/fake.tsx'] };
