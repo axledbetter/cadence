@@ -413,15 +413,33 @@ export class SerializedWriter {
     // Best-effort seq sidecar + lock-seq advance. These mirror what
     // `appendEvent` in events.ts does so the rest of the run-state engine
     // sees a consistent view.
-    try {
-      fs.writeFileSync(path.join(runDir, '.seq'), String(seq), 'utf8');
-    } catch {
-      // intentionally swallowed — the events file is authoritative
-    }
-    try {
-      updateLockSeq(runDir, seq);
-    } catch {
-      // intentionally swallowed — per-run lock may not exist in tests
+    //
+    // Bugbot MEDIUM on PR #217 (commit 173cf31): advancing the .seq
+    // sidecar AFTER a non-fsynced write creates a durability mismatch.
+    // If the host crashes:
+    //   * events.ndjson tail (e.g. seq 48-50) wasn't durable, so on
+    //     restart the file ends at seq 47.
+    //   * .seq sidecar says 50 (we updated it post-write).
+    //   * readMaxSeq prefers the sidecar → returns 50.
+    //   * Next append writes seq 51 — gap (no seq 48-50), foldEvents
+    //     throws `corrupted_state` on replay.
+    // Fix: only advance .seq when the events line was fsync'd. Under
+    // `'never'` and informational events in `'terminal'` mode, the
+    // sidecar is intentionally left behind — readMaxSeq falls back to
+    // scanning events.ndjson on a sidecar miss, which is the
+    // authoritative source. Same logic for the lock-seq advance, which
+    // is consumed by the same read paths.
+    if (shouldFsync) {
+      try {
+        fs.writeFileSync(path.join(runDir, '.seq'), String(seq), 'utf8');
+      } catch {
+        // intentionally swallowed — the events file is authoritative
+      }
+      try {
+        updateLockSeq(runDir, seq);
+      } catch {
+        // intentionally swallowed — per-run lock may not exist in tests
+      }
     }
 
     return fullEvent;

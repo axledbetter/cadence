@@ -486,6 +486,50 @@ process.exit(0);
     assert.equal(ev.event, 'task.completed');
   });
 
+  it('.seq sidecar is NOT advanced for non-fsynced events (bugbot MEDIUM)', async () => {
+    // Bugbot MEDIUM finding on PR #217: if .seq sidecar is updated
+    // after a non-fsynced (informational) event, a host crash that
+    // loses the tail leaves the sidecar AHEAD of the durable events
+    // file. The next append would skip seqs and replay would throw.
+    // Fix: only update .seq when the event was fsync'd. Verify here.
+    const { runDir, eventsPath } = tmpRun();
+    const seqPath = path.join(runDir, '.seq');
+
+    await withWriter(eventsPath, async w => {
+      // Informational event under default 'terminal' mode — fsync skipped.
+      await w.writeEvent({
+        event: 'task.started',
+        task_id: 't1',
+        worktree_path: '/tmp',
+        branch: 'x',
+        base_sha: 'a'.repeat(40),
+        subagent_id: 'sa',
+        dispatched_at: new Date().toISOString(),
+        preflight_cost_estimate_usd: 0.1,
+      });
+      // .seq must NOT have been written — durable log doesn't reflect this event.
+      assert.equal(
+        fs.existsSync(seqPath),
+        false,
+        '.seq must not exist after a non-fsynced informational event',
+      );
+
+      // Terminal event — fsync fires, .seq advances to 2.
+      await w.writeEvent({
+        event: 'task.completed',
+        task_id: 't1',
+        base_sha: 'a'.repeat(40),
+        task_branch_tip_sha: 'b'.repeat(40),
+        task_branch_name: 'x',
+        commit_shas: ['b'.repeat(40)],
+        completed_at: new Date().toISOString(),
+        actual_cost_usd: 0.1,
+        exit_status: 'success',
+      });
+      assert.equal(fs.readFileSync(seqPath, 'utf8'), '2', '.seq must equal latest fsynced seq');
+    });
+  });
+
   it('init() preserves a pre-existing events.ndjson (codex pass 2 CRITICAL)', async () => {
     // Pre-fix: `existsSync` → `writeFileSync('')` would TRUNCATE an
     // events file that another concurrent process had already created
