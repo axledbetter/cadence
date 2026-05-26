@@ -258,4 +258,78 @@ describe('--profile is NOT rejected for profile-resolution-optional commands', (
       fs.rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it('examples node still routes correctly when global --profile precedes it (bugbot MEDIUM)', () => {
+    // Without the `args[subcommandIdx + 1]` fix in the examples case,
+    // a global --profile placed BEFORE `examples` would have shifted
+    // the stack positional and made runExamples receive the profile
+    // value as the stack name.
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['--profile', 'small-team', 'examples', 'node'], { cwd });
+      assert.equal(r.code, 0, `expected exit 0; stderr: ${r.stderr}`);
+      // node spec output contains the node-cli starter header.
+      assert.ok(r.stdout.length > 100, 'expected non-trivial spec body');
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('setup local --profile namespace is preserved (bugbot MEDIUM)', () => {
+  it('global --profile small-team setup is NOT rejected by setup local allowlist', () => {
+    // Pre-fix behavior: `cadence --profile small-team setup` would
+    // fall into the setup case (setup is profile-resolution-OPTIONAL),
+    // then `flag('profile')` would scan the entire argv, see
+    // `small-team`, validate against the legacy setup allowlist
+    // (security-strict|team|solo), and exit 1.
+    //
+    // Post-fix: setup only honors --profile values that appear AFTER
+    // the `setup` keyword. Global --profile before `setup` is
+    // ignored at the setup layer (setup has no profile-runtime
+    // behavior; ignoring is safe).
+    //
+    // setup writes guardrail.config.yaml — use a tmp cwd so the test
+    // doesn't mutate the repo. setup may emit warnings (no LLM key
+    // etc.) but should exit 0; the failure mode we're guarding
+    // against was exit 1 with "--profile must be security-strict / team / solo".
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['--profile', 'small-team', 'setup', '--force'], { cwd });
+      assert.doesNotMatch(
+        r.stderr,
+        /--profile must be "security-strict"/,
+        'setup should NOT have rejected the global --profile',
+      );
+      // setup may still exit non-zero if the env lacks LLM keys etc.;
+      // the assertion above is the regression gate.
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('local setup --profile security-strict still works (legacy overlay preserved)', () => {
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['setup', '--profile', 'security-strict', '--force'], { cwd });
+      assert.doesNotMatch(
+        r.stderr,
+        /--profile must be "security-strict"/,
+        'local --profile security-strict should be honored',
+      );
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('local setup --profile bogus still rejects with the legacy allowlist error', () => {
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['setup', '--profile', 'bogus', '--force'], { cwd });
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, /setup --profile must be "security-strict"/);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });

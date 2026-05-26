@@ -1245,10 +1245,33 @@ switch (subcommand) {
 
   case 'setup': {
     const force = args.includes('--force');
-    const profileArg = flag('profile');
+    // bugbot MEDIUM, PR #220: setup's --profile namespace (legacy
+    // preset overlay: security-strict|team|solo) collides with the
+    // v8.2.0 user-type --profile (solo|small-team|oss-maintainer|
+    // enterprise|learning). Without scoping the lookup, a global
+    // `cadence --profile small-team setup` would route to this case
+    // (setup is profile-resolution-OPTIONAL, so it doesn't fire the
+    // resolver), then `flag('profile')` would scan the entire argv,
+    // see `small-team`, and exit with the wrong error.
+    //
+    // Fix: only honor a setup --profile that appears AFTER the
+    // `setup` keyword. A global --profile placed before `setup` is
+    // intentionally ignored — setup isn't a profile-runtime-required
+    // verb, so the global value has no behavioral effect here. Users
+    // who want the legacy overlay must place the flag locally.
+    const setupArgs = args.slice(subcommandIdx + 1);
+    const localProfileIdx = setupArgs.indexOf('--profile');
+    const localProfileEq = setupArgs.find(a => a.startsWith('--profile='));
+    let profileArg: string | undefined;
+    if (localProfileEq !== undefined) {
+      profileArg = localProfileEq.slice('--profile='.length);
+    } else if (localProfileIdx >= 0) {
+      const val = setupArgs[localProfileIdx + 1];
+      if (val !== undefined && !val.startsWith('--')) profileArg = val;
+    }
     const json = boolFlag('json');
     if (profileArg && !['security-strict', 'team', 'solo'].includes(profileArg)) {
-      console.error(`\x1b[31m[claude-autopilot] --profile must be "security-strict", "team", or "solo"\x1b[0m`);
+      console.error(`\x1b[31m[claude-autopilot] setup --profile must be "security-strict", "team", or "solo" (legacy preset overlay; distinct from the v8.2.0 user-type --profile)\x1b[0m`);
       process.exit(1);
     }
     const code = await runUnderJsonMode(
@@ -1315,8 +1338,15 @@ switch (subcommand) {
     // call `resolveActiveProfileOrExit()` — `examples` must work in a
     // repo with a broken `.autopilot/profile` so users can pipe a
     // starter spec into a file before they have a working profile.
+    //
+    // Use `subcommandIdx + 1` (not `args[1]`) so the stack positional
+    // resolves correctly when the user puts the global --profile flag
+    // BEFORE the `examples` keyword (bugbot MEDIUM, PR #220:
+    // `cadence --profile <name> examples node` previously read `<name>`
+    // as the stack and failed).
     const { runExamples } = await import('./examples.ts');
-    const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+    const next = args[subcommandIdx + 1];
+    const target = next && !next.startsWith('--') ? next : undefined;
     const code = runExamples(target);
     process.exit(code);
     break;
