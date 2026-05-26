@@ -21,9 +21,13 @@
   Step 4.5 (between validate and migrate-dev) refuses destructive
   migrations without an explicit annotation. See
   `docs/migrations/expand-contract.md` for the operator workflow.
-  Closes #179 Phase 1. Dispatcher-level enforcement (list-pending
-  skill verb, manifest format, MigrationClassification artifact
-  field, sanctioned contract policy) is deferred to Phase 2.
+  Refs #179 (Phase 1 only — issue stays open). Dispatcher-level
+  enforcement (list-pending skill verb, manifest format,
+  MigrationClassification artifact field, sanctioned contract
+  policy) is deferred to a Phase 2 follow-up issue and is required
+  before #179 can be closed. Until Phase 2 ships, the load-bearing
+  safety guarantee applies ONLY to autopilot users (via Step 4.5).
+  Direct \`cadence migrate\` invocations are not yet gated.
 
 ### Changed
 

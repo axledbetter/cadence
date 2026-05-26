@@ -689,6 +689,27 @@ export function classify(sql: string): ClassificationResult {
   let pinned = false;
   let pinnedAs: PinnedAs = null;
   let bypassed = false;
+
+  // Lexer-incomplete files cannot be safely bypassed or pinned to additive —
+  // a malformed migration could be hiding destructive tokens from the
+  // pattern matcher. Short-circuit before annotation interpretation. (We
+  // still set `bypassed` for `classify=contract` so the operator gets the
+  // pinning signal in the JSON output, but pinning to additive/expand is
+  // refused.)
+  if (!lexResult.complete) {
+    return {
+      classification: fileClass,
+      statements,
+      annotation,
+      pinned: false,
+      pinnedAs: null,
+      bypassed: false,
+      bypassReason: null,
+      parseWarnings: lexResult.warnings,
+      lexerComplete: false,
+    };
+  }
+
   let bypassReason: string | null = null;
 
   if (annotation) {

@@ -326,6 +326,53 @@ describe('classify — annotation: ambiguous pinning', () => {
   });
 });
 
+describe('classify — annotation cannot downgrade detected severity', () => {
+  it('classify=additive on a DESTRUCTIVE file does NOT pin (file stays destructive)', () => {
+    const sql = '-- @autopilot: classify=additive\nDROP TABLE foo;';
+    const r = classify(sql);
+    assert.equal(r.classification, 'destructive', 'file stays destructive');
+    assert.equal(r.pinned, false, 'pin is refused on destructive files');
+    assert.equal(r.pinnedAs, null);
+    assert.equal(r.bypassed, false);
+  });
+  it('classify=expand on a DESTRUCTIVE file does NOT pin', () => {
+    const sql = '-- @autopilot: classify=expand\nDROP TABLE foo;';
+    const r = classify(sql);
+    assert.equal(r.classification, 'destructive');
+    assert.equal(r.pinned, false);
+  });
+  it('valid bypass on an additive file is recorded but does not change anything', () => {
+    // Pathological case — operator pasted a bypass annotation on a benign file.
+    // Should be a no-op: file is already additive.
+    const sql =
+      '-- @autopilot: classify=destructive_allowed_reason=incident=999 just docs\n' +
+      'CREATE TABLE foo (id int);';
+    const r = classify(sql);
+    assert.equal(r.classification, 'additive');
+    // bypassed mirrors the annotation (truthful); CLI exit code is still 0.
+    assert.equal(r.bypassed, true);
+  });
+});
+
+describe('classify — lexer-incomplete files refuse bypass and pinning', () => {
+  it('unterminated comment forces ambiguous regardless of annotation', () => {
+    const sql = '-- @autopilot: classify=additive\n/* never closed\nDROP TABLE foo;';
+    const r = classify(sql);
+    assert.equal(r.lexerComplete, false);
+    assert.equal(r.classification, 'ambiguous', 'forced to ambiguous');
+    assert.equal(r.pinned, false, 'pinning refused on lexer-incomplete file');
+    assert.equal(r.bypassed, false, 'bypass refused on lexer-incomplete file');
+  });
+  it('unterminated string + bypass annotation does not pass', () => {
+    const sql =
+      '-- @autopilot: classify=destructive_allowed_reason=incident=1234 sneak attempt\n' +
+      "CREATE TABLE foo (x text DEFAULT 'never closed";
+    const r = classify(sql);
+    assert.equal(r.lexerComplete, false);
+    assert.equal(r.bypassed, false, 'bypass refused on lexer-incomplete file');
+  });
+});
+
 describe('classify — RLS edge cases', () => {
   it('CREATE POLICY permissive → ambiguous', () =>
     expectClass(
