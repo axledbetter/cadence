@@ -192,15 +192,26 @@ export async function runDoctor(): Promise<DoctorResult> {
   //     typo even when the schema would reject the file outright. The
   //     loader's own pre-validation `console.warn` covers `cadence run`
   //     etc.; this surfaces the same warning prominently inside doctor.
+  //
+  //     Codex pass 1 on PR #217: malformed YAML must NOT be silently
+  //     swallowed — promote to a doctor warning so the user knows the
+  //     budgets scan was skipped and why.
   if (fs.existsSync(configYaml)) {
     let unknownKeys: ReturnType<typeof findUnknownBudgetKeys> = [];
+    let parseError: string | null = null;
     try {
       const parsed = yaml.load(fs.readFileSync(configYaml, 'utf8'));
       unknownKeys = findUnknownBudgetKeys(parsed);
-    } catch {
-      // Malformed YAML — let other tooling surface the parse error.
+    } catch (err) {
+      parseError = err instanceof Error ? err.message : String(err);
     }
-    if (unknownKeys.length > 0) {
+    if (parseError !== null) {
+      checks.push({
+        name: 'guardrail.config.yaml parse',
+        result: 'warn',
+        message: `YAML parse failed — budgets typo scan skipped: ${parseError}`,
+      });
+    } else if (unknownKeys.length > 0) {
       const lines = formatBudgetWarnings(unknownKeys);
       checks.push({
         name: `budgets unknown key${unknownKeys.length > 1 ? 's' : ''} (${unknownKeys.length})`,

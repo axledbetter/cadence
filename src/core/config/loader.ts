@@ -8,18 +8,22 @@ import { GUARDRAIL_CONFIG_SCHEMA } from './schema.ts';
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validate = ajv.compile(GUARDRAIL_CONFIG_SCHEMA);
 
-/** v8.1.1 — known + historical `budgets.*` keys (issue #210). The schema
- *  is `additionalProperties: false`, so any other key fails validation
- *  outright; this set is used for the PRE-validation `console.warn` that
- *  pinpoints the unknown key for the user (and `cadence doctor`) BEFORE
- *  the generic Ajv error fires. Historical keys (none yet) stay listed
- *  here as deprecated members so they don't trip the warning. */
-export const KNOWN_BUDGET_KEYS: ReadonlySet<string> = new Set([
+/** v8.1.1 — single source of truth for the recognized `budgets.*` keys
+ *  (issue #210; codex pass 1 finding on PR #217). The runtime schema in
+ *  `./schema.ts` and the JSON schema in
+ *  `presets/schemas/guardrail.config.schema.json` mirror this list; a
+ *  startup test (`tests/config-loader-budgets.test.ts`) asserts they
+ *  agree, so adding a key in three places drift-free is impossible —
+ *  one update fails the test until the others follow. */
+export const BUDGET_KEYS = [
   'perRunUSD',
   'perPhaseUSD',
   'perSubagentUSD',
   'conservativePhaseReserveUSD',
-]);
+] as const;
+
+/** Set form for O(1) membership in the warning emit hot path. */
+export const KNOWN_BUDGET_KEYS: ReadonlySet<string> = new Set(BUDGET_KEYS);
 
 export interface UnknownBudgetKey {
   key: string;

@@ -199,15 +199,48 @@ export class SerializedWriter {
 
   private async init(): Promise<void> {
     // Ensure run dir exists.
-    fs.mkdirSync(path.dirname(this.opts.eventsNdjsonPath), { recursive: true });
+    const runDir = path.dirname(this.opts.eventsNdjsonPath);
+    fs.mkdirSync(runDir, { recursive: true });
 
     // Ensure events file exists (open for append creates it but
     // proper-lockfile's stat-then-lock needs the lock target to exist too).
-    if (!fs.existsSync(this.opts.eventsNdjsonPath)) {
+    // Track whether we created the file so we can fsync the parent dir
+    // afterwards — a plain file fsync only guarantees data; directory
+    // metadata for the new entry survives crash only after a parent-dir
+    // fsync (Codex pass 1 finding on v8.1.1 PR).
+    const createdEventsFile = !fs.existsSync(this.opts.eventsNdjsonPath);
+    if (createdEventsFile) {
       fs.writeFileSync(this.opts.eventsNdjsonPath, '');
     }
     if (!fs.existsSync(this.opts.lockPath)) {
       fs.writeFileSync(this.opts.lockPath, '');
+    }
+
+    // v8.1.1 — fsync the parent directory once after creating the events
+    // file so the directory entry survives a crash before the first
+    // terminal-event fsync lands. Skipped under `durability: 'never'`
+    // to preserve v7.11.0 behavior verbatim. Best-effort: macOS rejects
+    // directory fds opened RDONLY in some Node versions; we swallow
+    // those errors because the worst case is "as good as v7.11.0."
+    //
+    // NB: this uses `fs.fsyncSync` DIRECTLY, not the injectable
+    // `this.fsyncSync` test seam — the directory-fsync is a one-shot
+    // setup step, not part of the per-event hot path the durability
+    // tests are observing. Routing it through the seam would inflate
+    // the spy's call count by one on first-write and break the
+    // assertion of "N fsyncs per N events."
+    if (createdEventsFile && this.opts.durability !== 'never') {
+      try {
+        const dirFd = fs.openSync(runDir, 'r');
+        try {
+          fs.fsyncSync(dirFd);
+        } finally {
+          fs.closeSync(dirFd);
+        }
+      } catch {
+        // intentionally swallowed — directory fsync is a best-effort
+        // first-write safety net; per-event fsync still applies.
+      }
     }
 
     // Sweep stale lock dirs from prior crashed processes. proper-lockfile

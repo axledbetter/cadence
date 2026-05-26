@@ -11,12 +11,21 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 import {
   loadConfig,
   findUnknownBudgetKeys,
   formatBudgetWarnings,
   KNOWN_BUDGET_KEYS,
+  BUDGET_KEYS,
 } from '../src/core/config/loader.ts';
+import { GUARDRAIL_CONFIG_SCHEMA } from '../src/core/config/schema.ts';
 import { GuardrailError } from '../src/core/errors.ts';
 
 describe('findUnknownBudgetKeys (pure)', () => {
@@ -131,3 +140,50 @@ describe('loadConfig + budgets schema', () => {
 
 // Mark `mock` as used so the lint pass doesn't flag the import.
 void mock;
+
+describe('budget keys source-of-truth (codex pass 1 finding)', () => {
+  it('runtime schema enumerates the same keys as BUDGET_KEYS', () => {
+    const schemaKeys = Object.keys(
+      (GUARDRAIL_CONFIG_SCHEMA.properties.budgets as { properties: Record<string, unknown> })
+        .properties,
+    );
+    assert.deepEqual(schemaKeys.sort(), [...BUDGET_KEYS].sort());
+  });
+
+  it('preset JSON schema enumerates the same keys as BUDGET_KEYS', () => {
+    const jsonSchemaPath = path.resolve(
+      __dirname,
+      '..',
+      'presets',
+      'schemas',
+      'guardrail.config.schema.json',
+    );
+    const json = JSON.parse(fs.readFileSync(jsonSchemaPath, 'utf8')) as {
+      properties: { budgets: { properties: Record<string, unknown> } };
+    };
+    const jsonKeys = Object.keys(json.properties.budgets.properties);
+    assert.deepEqual(jsonKeys.sort(), [...BUDGET_KEYS].sort());
+  });
+
+  it('runtime schema budgets block is additionalProperties: false', () => {
+    assert.equal(
+      (GUARDRAIL_CONFIG_SCHEMA.properties.budgets as { additionalProperties: boolean })
+        .additionalProperties,
+      false,
+    );
+  });
+
+  it('preset JSON schema budgets block is additionalProperties: false', () => {
+    const jsonSchemaPath = path.resolve(
+      __dirname,
+      '..',
+      'presets',
+      'schemas',
+      'guardrail.config.schema.json',
+    );
+    const json = JSON.parse(fs.readFileSync(jsonSchemaPath, 'utf8')) as {
+      properties: { budgets: { additionalProperties: boolean } };
+    };
+    assert.equal(json.properties.budgets.additionalProperties, false);
+  });
+});
