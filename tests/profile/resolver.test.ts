@@ -95,16 +95,39 @@ describe('resolveProfile — precedence (file < env < flag)', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 
-  it('empty flag value rejected with path_traversal code', () => {
+  it('empty flag value rejected with parse_error code (NOT path_traversal — bugbot LOW)', () => {
     const cwd = mkTempCwd();
     assert.throws(
       () => resolveProfile({ cwd, flagProfile: '' }),
       (err: ProfileResolutionError) => {
-        assert.equal(err.code, 'path_traversal');
+        assert.equal(err.code, 'parse_error');
         assert.equal(err.source, 'flag');
         return true;
       },
     );
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('CRLF profile file is parsed correctly (bugbot MEDIUM: Windows compat)', () => {
+    // Without explicit \r stripping in parseProfileFile, a Windows file
+    // would split to ["enterprise\r", ""], the first line would survive
+    // trailing-whitespace trim with the \r intact, and the
+    // embedded-whitespace check would reject the candidate as
+    // `enter prise`-style. Verify the CRLF case is now silently
+    // normalized.
+    const cwd = mkTempCwd();
+    writeProfileFile(cwd, 'enterprise\r\n');
+    const r = resolveProfile({ cwd });
+    assert.equal(r.name, 'enterprise');
+    assert.equal(r.source, 'file');
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('CRLF profile file with trailing blank CRLF lines is parsed correctly', () => {
+    const cwd = mkTempCwd();
+    writeProfileFile(cwd, 'small-team\r\n\r\n');
+    const r = resolveProfile({ cwd });
+    assert.equal(r.name, 'small-team');
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 });
@@ -196,7 +219,17 @@ describe('resolveProfile — path-safety (flag source)', () => {
 describe('parseProfileFile — allowed forms', () => {
   beforeEach(() => _resetSchemaCache());
 
-  for (const allowed of ['enterprise\n', 'enterprise   \n', 'enterprise\n\n', 'enterprise\n\n\n']) {
+  for (const allowed of [
+    'enterprise\n',
+    'enterprise   \n',
+    'enterprise\n\n',
+    'enterprise\n\n\n',
+    // CRLF (Windows) — bugbot MEDIUM. \r is stripped as trailing
+    // whitespace so the candidate name is clean.
+    'enterprise\r\n',
+    'enterprise   \r\n',
+    'enterprise\r\n\r\n',
+  ]) {
     it(`accepts ${JSON.stringify(allowed)}`, () => {
       assert.equal(_parseProfileFileForTest(allowed), 'enterprise');
     });

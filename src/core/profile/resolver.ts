@@ -272,8 +272,12 @@ function loadProfileByName(
  * well-formedness of the file).
  */
 function parseProfileFile(contents: string): string | null {
-  // Split on \n; strip trailing spaces + tabs from each line.
-  const lines = contents.split('\n').map(l => l.replace(/[ \t]+$/, ''));
+  // Split on \n; strip trailing CR (Windows CRLF) and trailing spaces +
+  // tabs from each line. Without the explicit \r strip, a CRLF file
+  // (`enterprise\r\n`) would carry the \r into the candidate name and
+  // trip the embedded-whitespace check below — Windows users would never
+  // be able to use the file (bugbot, medium severity).
+  const lines = contents.split('\n').map(l => l.replace(/[ \t\r]+$/, ''));
   const nonEmpty = lines.filter(l => l.length > 0);
   if (nonEmpty.length === 0) {
     // Empty / whitespace-only file — treat as unset.
@@ -352,11 +356,17 @@ export function resolveProfile(opts: ResolveProfileOptions): ResolvedProfile {
     try {
       raw = fs.readFileSync(profileFilePath, 'utf8');
     } catch (err) {
+      // Filesystem-level failure (EACCES, EIO, transient mount issue) —
+      // NOT a content / parse problem. Bucket as `unknown` so doctor
+      // messaging and downstream branches don't suggest "fix your
+      // profile file's syntax" when the actual issue is permissions
+      // (bugbot, low severity).
       throw new ProfileResolutionError(
         `Failed to read ${profileFilePath}`,
         {
-          code: 'parse_error',
+          code: 'unknown',
           source: 'file',
+          hint: `Check file permissions on .autopilot/profile, or delete the file to fall back to the env/flag/default chain.`,
           details: { cause: err instanceof Error ? err.message : String(err) },
         },
       );
@@ -376,14 +386,18 @@ export function resolveProfile(opts: ResolveProfileOptions): ResolvedProfile {
   }
 
   // Layer 3: CLI flag. Empty flag value is explicitly rejected — passing
-  // `--profile ""` is a user mistake, not an "unset" signal.
+  // `--profile ""` is a user mistake, not an "unset" signal. We use the
+  // `parse_error` code (not `path_traversal`) because an empty string
+  // isn't a traversal attempt; it's a malformed CLI argument that a
+  // downstream "wrong-remediation" branch (bugbot, low severity) should
+  // distinguish from `../solo`-style attacks.
   const flagValue = opts.flagProfile;
   if (flagValue !== undefined) {
     if (flagValue.trim().length === 0) {
       throw new ProfileResolutionError(
         `--profile flag was supplied with an empty value.`,
         {
-          code: 'path_traversal',
+          code: 'parse_error',
           source: 'flag',
           hint: `Pass a profile name (e.g. \`--profile solo\`) or omit the flag.`,
         },
