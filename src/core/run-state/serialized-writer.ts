@@ -89,6 +89,30 @@ import {
 /** Sibling path suffix for the writer's exclusive lock. */
 const WRITER_LOCK_SUFFIX = '.writer.lock';
 
+/** Best-effort directory fsync used by `init()` to persist newly-created
+ *  directory entries (the run dir + its parent) so they survive a host
+ *  crash before the first per-event fsync lands. Errors are swallowed
+ *  because:
+ *   * macOS rejects directory fds opened RDONLY in some Node builds
+ *     (EINVAL); the file-level fsyncs still apply.
+ *   * EPERM / non-POSIX filesystems (Windows) cannot fsync directories
+ *     at all — we degrade gracefully to file-only durability.
+ *   * The dir doesn't exist (extremely shallow paths like '/') — nothing
+ *     to fsync. */
+function fsyncDirSafe(dir: string): void {
+  try {
+    const fd = fs.openSync(dir, 'r');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // intentionally swallowed — directory fsync is a best-effort safety
+    // net layered on top of per-event file fsync.
+  }
+}
+
 /** v8.1.1 — fsync durability policy for `events.ndjson`. Trade-off between
  *  crash safety and append throughput.
  *
@@ -202,46 +226,62 @@ export class SerializedWriter {
     const runDir = path.dirname(this.opts.eventsNdjsonPath);
     fs.mkdirSync(runDir, { recursive: true });
 
-    // Ensure events file exists (open for append creates it but
-    // proper-lockfile's stat-then-lock needs the lock target to exist too).
-    // Track whether we created the file so we can fsync the parent dir
-    // afterwards — a plain file fsync only guarantees data; directory
-    // metadata for the new entry survives crash only after a parent-dir
-    // fsync (Codex pass 1 finding on v8.1.1 PR).
-    const createdEventsFile = !fs.existsSync(this.opts.eventsNdjsonPath);
-    if (createdEventsFile) {
-      fs.writeFileSync(this.opts.eventsNdjsonPath, '');
-    }
-    if (!fs.existsSync(this.opts.lockPath)) {
-      fs.writeFileSync(this.opts.lockPath, '');
-    }
-
-    // v8.1.1 — fsync the parent directory once after creating the events
-    // file so the directory entry survives a crash before the first
-    // terminal-event fsync lands. Skipped under `durability: 'never'`
-    // to preserve v7.11.0 behavior verbatim. Best-effort: macOS rejects
-    // directory fds opened RDONLY in some Node versions; we swallow
-    // those errors because the worst case is "as good as v7.11.0."
-    //
-    // NB: this uses `fs.fsyncSync` DIRECTLY, not the injectable
-    // `this.fsyncSync` test seam — the directory-fsync is a one-shot
-    // setup step, not part of the per-event hot path the durability
-    // tests are observing. Routing it through the seam would inflate
-    // the spy's call count by one on first-write and break the
-    // assertion of "N fsyncs per N events."
-    if (createdEventsFile && this.opts.durability !== 'never') {
-      try {
-        const dirFd = fs.openSync(runDir, 'r');
-        try {
-          fs.fsyncSync(dirFd);
-        } finally {
-          fs.closeSync(dirFd);
-        }
-      } catch {
-        // intentionally swallowed — directory fsync is a best-effort
-        // first-write safety net; per-event fsync still applies.
+    // Ensure events + lock files exist. Codex pass 2 CRITICAL on PR
+    // #217: the prior `existsSync` → `writeFileSync('')` pattern was
+    // racy across concurrent processes — two scheduler processes could
+    // both observe the file as missing, the first appends events, then
+    // the second calls `writeFileSync('', '')` and TRUNCATES the audit
+    // log. Fix by using `O_CREAT | O_EXCL` (`wx`) which atomically
+    // creates the file only when it doesn't exist, returning EEXIST
+    // otherwise. We treat EEXIST as authoritative "another writer
+    // created it" — we never truncate.
+    let createdEventsFile = false;
+    try {
+      const fd = fs.openSync(this.opts.eventsNdjsonPath, 'wx');
+      fs.closeSync(fd);
+      createdEventsFile = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
       }
     }
+    try {
+      const fd = fs.openSync(this.opts.lockPath, 'wx');
+      fs.closeSync(fd);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
+    }
+
+    // v8.1.1 — fsync the run directory so the events.ndjson directory
+    // entry (and any prior writer's tail data) is durable on disk.
+    // Skipped under `durability: 'never'` to preserve v7.11.0 behavior.
+    //
+    // Codex pass 2 WARNING #3 on PR #217: doing this only when WE
+    // created the file leaves a window where another process created
+    // it but hadn't yet fsynced the parent directory. We always fsync
+    // the run dir under durable mode, regardless of who created the
+    // file — the cost is one extra fsync per writer-startup, which is
+    // amortized across the run.
+    //
+    // Codex pass 2 WARNING #2 on PR #217: if `runDir` ITSELF was newly
+    // created by our `mkdirSync(recursive: true)`, the directory entry
+    // for runDir needs `path.dirname(runDir)` fsync'd too — otherwise
+    // the runDir itself can disappear on crash. We do that as well.
+    //
+    // NB: directory fsync uses `fs.fsyncSync` DIRECTLY, not the
+    // injectable `this.fsyncSync` test seam — the setup-time fsync is
+    // not part of the per-event hot path the durability tests observe.
+    if (this.opts.durability !== 'never') {
+      fsyncDirSafe(runDir);
+      // Best-effort: the parent of runDir may also be newly created.
+      // Fsyncing it is cheap (one syscall) and covers the "new run
+      // directory disappears after host crash" case (Codex pass 2 #2).
+      fsyncDirSafe(path.dirname(runDir));
+    }
+    // Suppress unused-warning when durability='never' skipped both calls.
+    void createdEventsFile;
 
     // Sweep stale lock dirs from prior crashed processes. proper-lockfile
     // creates `<lockPath>.lock` as a directory and unlinks it on release.

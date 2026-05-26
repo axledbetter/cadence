@@ -486,6 +486,32 @@ process.exit(0);
     assert.equal(ev.event, 'task.completed');
   });
 
+  it('init() preserves a pre-existing events.ndjson (codex pass 2 CRITICAL)', async () => {
+    // Pre-fix: `existsSync` → `writeFileSync('')` would TRUNCATE an
+    // events file that another concurrent process had already created
+    // and appended events to. Post-fix: `wx` open with EEXIST swallow
+    // is atomic — second writer sees the existing file untouched.
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'serialized-writer-precreate-'));
+    const eventsPath = path.join(runDir, 'events.ndjson');
+    const lockPath = `${eventsPath}.writer.lock`;
+    const preExistingContent = '{"event":"task.started","seq":1}\n';
+    fs.writeFileSync(eventsPath, preExistingContent);
+    fs.writeFileSync(lockPath, '');
+
+    const w = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: testWriterId,
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 100,
+    });
+    try {
+      // init() must NOT have truncated the existing file.
+      assert.equal(fs.readFileSync(eventsPath, 'utf8'), preExistingContent);
+    } finally {
+      await w.close();
+    }
+  });
+
   it('sweeps stale lock dirs left by crashed prior process (bugbot pass 3)', async () => {
     // Simulate a crashed process: the lock dir `<lockPath>.lock` exists
     // but no live owner. init() must clean it so the next acquire
