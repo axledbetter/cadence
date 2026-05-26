@@ -1,0 +1,19 @@
+# enterprise — strict review with mandatory risk frontmatter + audit log.
+#
+# Every risk tier gets 3 Codex passes (no shortcuts). The spec MUST declare
+# a `risk:` frontmatter field — autopilot refuses to start otherwise. All
+# Codex findings, bugbot triage decisions, and merge events are appended
+# to `.claude/audit/<run-ulid>.jsonl` as immutable JSONL.
+profile: enterprise
+description: Strict review with mandatory risk frontmatter, 3 Codex passes on every tier, and append-only audit log.
+codex_passes:
+  low: 3
+  medium: 3
+  high: 3
+auto_merge: false
+require_risk_frontmatter: true
+pause_at_steps: []
+audit_log_path: .claude/audit/
+codex_explanations: false
+pr_template_path: presets/profiles/templates/enterprise-pr-template.md
+contributor_policy: null

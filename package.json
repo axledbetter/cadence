@@ -75,6 +75,8 @@
     "dist/**/*.json",
     "examples/",
     "presets/",
+    "presets/profiles/**",
+    "presets/schemas/profile.schema.json",
     "skills/",
     "scripts/test-runner.mjs",
     "scripts/post-build-rewrite-imports.mjs",

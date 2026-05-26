@@ -472,7 +472,15 @@ Resolution overrides (v7.8.0):
                          bundled fallthrough). Env equivalent: CLAUDE_AUTOPILOT_TSX.
                          Silence the bundled-fallthrough warning with
                          CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1. \`tsx\` will be
-                         removed from runtime deps in v8.0.0.`;
+                         removed from runtime deps in v8.0.0.
+
+User-type profile (v8.2.0+, full CLI wiring lands in v8.2.0 PR2):
+  --profile <name>       Override the active user-type profile (solo, small-team,
+                         oss-maintainer, enterprise, learning). Precedence:
+                         .autopilot/profile < CLAUDE_AUTOPILOT_PROFILE env < this flag.
+                         Default is solo (behavioral parity with v7.10.1).
+                         Schema + resolver shipped in v8.2.0 PR1; the flag
+                         becomes active once dispatcher wiring lands in PR2.`;
 
 /** Build the full two-level help text. Returned as a string so tests can assert against it without spawning. */
 export function buildHelpText(): string {

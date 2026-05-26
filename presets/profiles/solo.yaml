@@ -1,0 +1,18 @@
+# solo — single developer, fast iteration loop.
+#
+# This is the autopilot default. Behaviorally identical to v7.10.1 — existing
+# users who never opt into a profile see no change. Codex passes scale with
+# risk tier (1 / 2 / 3) and the pipeline auto-merges when checks pass.
+profile: solo
+description: Single dev, fast iteration. Default profile (behavioral parity with v7.10.1).
+codex_passes:
+  low: 1
+  medium: 2
+  high: 3
+auto_merge: true
+require_risk_frontmatter: false
+pause_at_steps: []
+audit_log_path: null
+codex_explanations: false
+pr_template_path: null
+contributor_policy: null
