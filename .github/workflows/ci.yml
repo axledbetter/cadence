@@ -6,6 +6,15 @@ on:
     # filter on pull_request below — codex pass W4).
     branches: [master]
     tags: ['v*']
+  # Manual trigger — used to re-run Publish to npm against an existing
+  # tag with a freshly-rotated NPM_TOKEN. GitHub Actions reruns of a
+  # completed workflow read the secret-state from the original run; only
+  # a fresh workflow event picks up rotated secrets. Dispatch this
+  # workflow with the tag selected as the ref (GitHub UI "Use workflow
+  # from" dropdown supports tags) and the publish job reads github.ref_name
+  # as the tag and proceeds normally. No inputs needed — using inputs
+  # would create a potential workflow injection surface.
+  workflow_dispatch: {}
   pull_request:
     branches: [master]
     # v7.1.5 — change-aware CI matrix. Skip the CLI test job for PRs that
