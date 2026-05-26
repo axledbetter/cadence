@@ -474,13 +474,15 @@ Resolution overrides (v7.8.0):
                          CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1. \`tsx\` will be
                          removed from runtime deps in v8.0.0.
 
-User-type profile (v8.2.0+, full CLI wiring lands in v8.2.0 PR2):
-  --profile <name>       Override the active user-type profile (solo, small-team,
-                         oss-maintainer, enterprise, learning). Precedence:
-                         .autopilot/profile < CLAUDE_AUTOPILOT_PROFILE env < this flag.
+User-type profile (v8.2.0 PR1 ships schema + resolver only — flag NOT YET wired):
+  --profile <name>       [NOT YET ACTIVE in v8.2.0 PR1] Reserved for the v8.2.0
+                         PR2 CLI wiring. Once active, will override the resolved
+                         user-type profile (solo, small-team, oss-maintainer,
+                         enterprise, learning) with precedence
+                         .autopilot/profile < CLAUDE_AUTOPILOT_PROFILE env < flag.
                          Default is solo (behavioral parity with v7.10.1).
-                         Schema + resolver shipped in v8.2.0 PR1; the flag
-                         becomes active once dispatcher wiring lands in PR2.`;
+                         Until PR2 lands, passing this flag is a no-op (the
+                         dispatcher will treat it as an unknown argument).`;
 
 /** Build the full two-level help text. Returned as a string so tests can assert against it without spawning. */
 export function buildHelpText(): string {

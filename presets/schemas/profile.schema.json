@@ -68,7 +68,7 @@
     "audit_log_path": {
       "type": ["string", "null"],
       "default": null,
-      "description": "Relative path inside the repo where append-only audit logs are written as `<audit_log_path>/<run-ulid>.jsonl`. `null` disables audit logging. When non-null, must be a relative path (no leading `/`) and must not contain `..` segments — both prevent escaping the repo root.",
+      "description": "Relative DIRECTORY inside the repo (not a file path) where append-only audit logs are written as `<audit_log_path>/<run-ulid>.jsonl`. The resolver / consumer is responsible for joining the run-ulid filename — the value here names the parent directory only (e.g. `.claude/audit/`). `null` disables audit logging. When non-null, must be a relative path (no leading `/`) and must not contain `..` segments — both prevent escaping the repo root. Per-run filename is fixed by the consumer to keep ULID monotonic ordering.",
       "pattern": "^(?!/)(?!.*\\.\\.).+$"
     },
     "codex_explanations": {
