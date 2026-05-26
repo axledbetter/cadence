@@ -1,5 +1,30 @@
 ## Unreleased — v8.1.1 target
 
+### Added
+
+- **Migration safety classifier (issue #179, Phase 1).** New
+  `src/core/migrate/classify.ts` module + `cadence migrate classify
+  --file=<path>` CLI verb classify a single SQL migration file as
+  `additive` / `destructive` / `ambiguous`. Detects 16+ destructive
+  forms (DROP, ALTER COLUMN TYPE/SET/DROP NOT NULL, RENAME, TRUNCATE,
+  DELETE FROM, DISABLE RLS, etc.), 14+ additive forms, and 15+
+  ambiguous forms (CREATE INDEX non-concurrent, GRANT, CREATE POLICY,
+  CREATE TRIGGER, CREATE OR REPLACE, validated ADD CONSTRAINT, etc.).
+  Multi-clause `ALTER TABLE` is reduced clause-by-clause (so
+  `ADD COLUMN x, DROP COLUMN y` is destructive — `DROP COLUMN` wins).
+  Lexer is quote- and dollar-quote-aware so destructive keywords
+  inside string literals or PL/pgSQL bodies don't trigger.
+  Annotations: `-- @autopilot: classify=additive|destructive|expand|
+  contract` pins ambiguous files; `-- @autopilot:
+  classify=destructive_allowed_reason=incident=<ref> <≥ 10 chars>`
+  opens an emergency bypass with a required trace token. Autopilot
+  Step 4.5 (between validate and migrate-dev) refuses destructive
+  migrations without an explicit annotation. See
+  `docs/migrations/expand-contract.md` for the operator workflow.
+  Closes #179 Phase 1. Dispatcher-level enforcement (list-pending
+  skill verb, manifest format, MigrationClassification artifact
+  field, sanctioned contract policy) is deferred to Phase 2.
+
 ### Changed
 
 - **Audit-log fsync policy for terminal events (issue #209).**
