@@ -8,6 +8,62 @@ import { GUARDRAIL_CONFIG_SCHEMA } from './schema.ts';
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validate = ajv.compile(GUARDRAIL_CONFIG_SCHEMA);
 
+/** v8.1.1 — single source of truth for the recognized `budgets.*` keys
+ *  (issue #210; codex pass 1 finding on PR #217). The runtime schema in
+ *  `./schema.ts` and the JSON schema in
+ *  `presets/schemas/guardrail.config.schema.json` mirror this list; a
+ *  startup test (`tests/config-loader-budgets.test.ts`) asserts they
+ *  agree, so adding a key in three places drift-free is impossible —
+ *  one update fails the test until the others follow. */
+export const BUDGET_KEYS = [
+  'perRunUSD',
+  'perPhaseUSD',
+  'perSubagentUSD',
+  'conservativePhaseReserveUSD',
+] as const;
+
+/** Set form for O(1) membership in the warning emit hot path. */
+export const KNOWN_BUDGET_KEYS: ReadonlySet<string> = new Set(BUDGET_KEYS);
+
+export interface UnknownBudgetKey {
+  key: string;
+  /** Closest known key by case-insensitive equality, if any. Helps users
+   *  spot case typos like `perSubAgentUsd` → `perSubagentUSD`. */
+  didYouMean?: string;
+}
+
+/** Walk `config.budgets` (if present and object-shaped) and return any
+ *  keys not in {@link KNOWN_BUDGET_KEYS}. Pure — no IO, no side effects.
+ *  Used by both the loader (which emits the warning) and tests. */
+export function findUnknownBudgetKeys(parsed: unknown): UnknownBudgetKey[] {
+  if (!parsed || typeof parsed !== 'object') return [];
+  const budgets = (parsed as Record<string, unknown>).budgets;
+  if (!budgets || typeof budgets !== 'object' || Array.isArray(budgets)) return [];
+
+  const out: UnknownBudgetKey[] = [];
+  const knownLower = new Map<string, string>();
+  for (const k of KNOWN_BUDGET_KEYS) knownLower.set(k.toLowerCase(), k);
+
+  for (const key of Object.keys(budgets as Record<string, unknown>)) {
+    if (KNOWN_BUDGET_KEYS.has(key)) continue;
+    const didYouMean = knownLower.get(key.toLowerCase());
+    out.push(didYouMean ? { key, didYouMean } : { key });
+  }
+  return out;
+}
+
+/** Format an unknown-budget-key list as `console.warn` lines. Exposed so
+ *  `cadence doctor` can render the same messages without re-running the
+ *  loader. */
+export function formatBudgetWarnings(unknown: UnknownBudgetKey[]): string[] {
+  return unknown.map(u => {
+    const suggestion = u.didYouMean
+      ? ` — did you mean "${u.didYouMean}"?`
+      : ` — recognized keys: ${[...KNOWN_BUDGET_KEYS].join(', ')}`;
+    return `[budgets] unknown key "${u.key}"${suggestion}`;
+  });
+}
+
 export async function loadConfig(path: string): Promise<GuardrailConfig> {
   let content: string;
   try {
@@ -27,6 +83,15 @@ export async function loadConfig(path: string): Promise<GuardrailConfig> {
       code: 'invalid_config',
       details: { path, cause: err instanceof Error ? err.message : String(err) },
     });
+  }
+
+  // v8.1.1 issue #210 — emit a `console.warn` BEFORE schema validation
+  // so the user sees the offending budgets.* key name even if the schema
+  // error (additionalProperties: false) buries it under generic text.
+  // Doctor consumes the same list via {@link findUnknownBudgetKeys}.
+  const unknownBudgetKeys = findUnknownBudgetKeys(parsed);
+  for (const line of formatBudgetWarnings(unknownBudgetKeys)) {
+    console.warn(line);
   }
 
   if (!validate(parsed)) {

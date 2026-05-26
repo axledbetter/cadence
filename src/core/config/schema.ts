@@ -152,6 +152,26 @@ export const GUARDRAIL_CONFIG_SCHEMA = {
     cache: { type: 'object' },
     persistence: { type: 'object' },
     concurrency: { type: 'object' },
+    /**
+     * Cost caps (USD) for the run. v8.1.1 enumerated the full set and
+     * tightened to `additionalProperties: false` so case typos like
+     * `perSubAgentUsd` fail schema validation instead of silently
+     * disabling the per-subagent cap. The loader ALSO emits a
+     * `console.warn` for any unknown `budgets.*` keys BEFORE schema
+     * validation, which surfaces in `cadence doctor`. Issue #210.
+     * Source of truth: presets/schemas/guardrail.config.schema.json
+     * (the JSON-schema-authoritative shape — keep both in sync).
+     */
+    budgets: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        perRunUSD: { type: 'number', minimum: 0 },
+        perPhaseUSD: { type: 'number', minimum: 0 },
+        perSubagentUSD: { type: ['number', 'null'], minimum: 0 },
+        conservativePhaseReserveUSD: { type: 'number', minimum: 0 },
+      },
+    },
     engine: {
       type: 'object',
       additionalProperties: false,

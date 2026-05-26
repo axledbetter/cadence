@@ -12,15 +12,26 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** ESM equivalent of `__dirname` for the crash-recovery test. */
+function __dirnameCompat(): string {
+  return path.dirname(fileURLToPath(import.meta.url));
+}
 
 import {
   SerializedWriter,
   writerLockPathFor,
 } from '../../src/core/run-state/serialized-writer.ts';
-import type { RunEvent, WriterId } from '../../src/core/run-state/types.ts';
+import {
+  TERMINAL_TASK_EVENT_KINDS,
+  type RunEvent,
+  type WriterId,
+} from '../../src/core/run-state/types.ts';
 
 const testWriterId: WriterId = { pid: process.pid, hostHash: 'test-host' };
 
@@ -255,6 +266,299 @@ describe('SerializedWriter', () => {
     assert.notEqual(p, '/tmp/run-x/events.ndjson');
     assert.ok(p.startsWith('/tmp/run-x/events.ndjson'));
     assert.ok(p.endsWith('.writer.lock'));
+  });
+
+  // -------------------------------------------------------------------------
+  // v8.1.1 — durability policy tests (issue #209).
+  //
+  // The serialized writer accepts a `durability` option: `'never' |
+  // 'terminal' | 'always'`. Default is `'terminal'` — fsync only after
+  // state-transition events. We verify the conditional fsync runs/skips
+  // for the right events without mocking node:fs (the implementation calls
+  // `fs.fsyncSync` directly; we instead spy via Node's `--test --import`
+  // hook + a wrapper that swaps the binding. Simpler: assert observable
+  // behaviour — content lands on disk regardless, but a forked subprocess
+  // that exits immediately after writing a terminal event survives, while
+  // a non-terminal event in `'never'` mode may not. Crash-recovery test
+  // covers that; the in-process tests assert the fsync path is reached by
+  // monkey-patching fs.fsyncSync for the duration of the test.
+  // -------------------------------------------------------------------------
+
+  it('default durability is "terminal" — fsyncs terminal events only', async () => {
+    const { eventsPath } = tmpRun();
+    let fsyncCalls = 0;
+    const fsyncSpy = (_fd: number) => { fsyncCalls += 1; };
+    {
+      // No `durability` option — default should be `'terminal'`.
+      const w = await SerializedWriter.create({
+        eventsNdjsonPath: eventsPath,
+        writerId: testWriterId,
+        pollIntervalMs: 1,
+        maxBlockingAttempts: 100,
+        __fsyncSyncImpl: fsyncSpy,
+      });
+      try {
+        // Informational event — must NOT fsync.
+        await w.writeEvent({
+          event: 'task.started',
+          task_id: 't1',
+          worktree_path: '/tmp/wt',
+          branch: 'autopilot/x/t1',
+          base_sha: 'a'.repeat(40),
+          subagent_id: 'sa-1',
+          dispatched_at: new Date().toISOString(),
+          preflight_cost_estimate_usd: 0.5,
+        });
+        assert.equal(fsyncCalls, 0, 'task.started must not fsync under terminal mode');
+
+        // Terminal event — must fsync.
+        await w.writeEvent({
+          event: 'task.completed',
+          task_id: 't1',
+          base_sha: 'a'.repeat(40),
+          task_branch_tip_sha: 'b'.repeat(40),
+          task_branch_name: 'autopilot/x/t1',
+          commit_shas: ['b'.repeat(40)],
+          completed_at: new Date().toISOString(),
+          actual_cost_usd: 0.45,
+          exit_status: 'success',
+        });
+        assert.equal(fsyncCalls, 1, 'task.completed must fsync exactly once under terminal mode');
+      } finally {
+        await w.close();
+      }
+    }
+  });
+
+  it('"never" mode skips fsync entirely (v7.11.0 compat)', async () => {
+    const { eventsPath } = tmpRun();
+    let fsyncCalls = 0;
+    const fsyncSpy = (_fd: number) => { fsyncCalls += 1; };
+    {
+      const w = await SerializedWriter.create({
+        eventsNdjsonPath: eventsPath,
+        writerId: testWriterId,
+        pollIntervalMs: 1,
+        maxBlockingAttempts: 100,
+        durability: 'never',
+        __fsyncSyncImpl: fsyncSpy,
+      });
+      try {
+        // Even a terminal event must NOT fsync under 'never'.
+        await w.writeEvent({
+          event: 'task.failed',
+          task_id: 't1',
+          error_message: 'boom',
+          error_type: 'crash',
+          failed_at: new Date().toISOString(),
+          actual_cost_usd: 0.1,
+        });
+        await w.writeEvent({
+          event: 'task.budget_halt',
+          task_id: 't2',
+          budget_remaining_usd: 0,
+          preflight_estimate_usd: 1,
+        });
+        assert.equal(fsyncCalls, 0, 'never mode must never fsync');
+      } finally {
+        await w.close();
+      }
+    }
+  });
+
+  it('"always" mode fsyncs every event', async () => {
+    const { eventsPath } = tmpRun();
+    let fsyncCalls = 0;
+    const fsyncSpy = (_fd: number) => { fsyncCalls += 1; };
+    {
+      const w = await SerializedWriter.create({
+        eventsNdjsonPath: eventsPath,
+        writerId: testWriterId,
+        pollIntervalMs: 1,
+        maxBlockingAttempts: 100,
+        durability: 'always',
+        __fsyncSyncImpl: fsyncSpy,
+      });
+      try {
+        // 3 events, all event kinds — must fsync 3 times.
+        await w.writeEvent({
+          event: 'task.started',
+          task_id: 't1',
+          worktree_path: '/tmp',
+          branch: 'x',
+          base_sha: 'a'.repeat(40),
+          subagent_id: 'sa',
+          dispatched_at: new Date().toISOString(),
+          preflight_cost_estimate_usd: 0.1,
+        });
+        await w.writeEvent({
+          event: 'task.budget_reserved',
+          task_id: 't1',
+          reserved_usd: 0.1,
+          run_budget_remaining_after_reservation_usd: 99.9,
+        });
+        await w.writeEvent({
+          event: 'task.completed',
+          task_id: 't1',
+          base_sha: 'a'.repeat(40),
+          task_branch_tip_sha: 'b'.repeat(40),
+          task_branch_name: 'x',
+          commit_shas: ['b'.repeat(40)],
+          completed_at: new Date().toISOString(),
+          actual_cost_usd: 0.1,
+          exit_status: 'success',
+        });
+        assert.equal(fsyncCalls, 3, 'always mode must fsync every event');
+      } finally {
+        await w.close();
+      }
+    }
+  });
+
+  it('terminal kinds list covers every documented terminal event', () => {
+    // Spec snapshot — issue #209 acceptance bullet. If a new terminal
+    // task event is added, this test forces the author to update the
+    // constant explicitly.
+    const expected = [
+      'task.completed',
+      'task.failed',
+      'task.merged',
+      'task.merge_conflict',
+      'task.merge_aborted',
+      'task.timeout',
+      'task.budget_halt',
+    ];
+    assert.deepEqual([...TERMINAL_TASK_EVENT_KINDS].sort(), expected.sort());
+  });
+
+  it('crash-recovery: terminal event survives an immediate process.exit', () => {
+    // Spawn a child Node process via tsx that writes a SINGLE
+    // task.completed event then exits immediately with code 0. Because
+    // the default durability is `'terminal'`, the fsync MUST have
+    // happened before the close+release path, so the event survives in
+    // the parent's read.
+    //
+    // Repo root resolved from this test file's location: tests/run-state/
+    // is two levels below the package root.
+    const repoRoot = path.resolve(__dirnameCompat(), '..', '..');
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'serialized-writer-crash-'));
+    const eventsPath = path.join(runDir, 'events.ndjson');
+    const childScript = path.join(runDir, 'child.mts');
+    const writerSrc = path.join(repoRoot, 'src/core/run-state/serialized-writer.ts');
+
+    fs.writeFileSync(
+      childScript,
+      `
+import { SerializedWriter } from ${JSON.stringify(writerSrc)};
+const w = await SerializedWriter.create({
+  eventsNdjsonPath: ${JSON.stringify(eventsPath)},
+  writerId: { pid: process.pid, hostHash: 'crash-test' },
+  pollIntervalMs: 1,
+  maxBlockingAttempts: 100,
+});
+await w.writeEvent({
+  event: 'task.completed',
+  task_id: 't1',
+  base_sha: 'a'.repeat(40),
+  task_branch_tip_sha: 'b'.repeat(40),
+  task_branch_name: 'x',
+  commit_shas: ['b'.repeat(40)],
+  completed_at: new Date().toISOString(),
+  actual_cost_usd: 0.1,
+  exit_status: 'success',
+});
+// Intentionally exit WITHOUT calling w.close() — simulates a crash
+// after the write-then-fsync but before graceful shutdown.
+process.exit(0);
+`,
+    );
+
+    const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+    const res = spawnSync(tsxBin, [childScript], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(res.status, 0, `child failed: stdout=${res.stdout} stderr=${res.stderr}`);
+
+    const lines = fs.readFileSync(eventsPath, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1, 'terminal event must survive crash');
+    const ev = JSON.parse(lines[0]!) as RunEvent;
+    assert.equal(ev.event, 'task.completed');
+  });
+
+  it('readMaxSeq returns max(sidecar, scan) — sidecar-behind safe (codex pass 3 CRITICAL)', async () => {
+    // Codex pass 3 finding on PR #217: under default `'terminal'` mode,
+    // a clean restart after an informational event must NOT re-issue
+    // its seq. Verify by writing a terminal event (seq=1) then an
+    // informational event (seq=2), then reading via the same code
+    // path `appendUnderLock` uses (`readMaxSeq`). Must return 2 so
+    // the next append uses seq=3.
+    const { runDir, eventsPath } = tmpRun();
+    const { readMaxSeq } = await import('../../src/core/run-state/events.ts');
+
+    await withWriter(eventsPath, async w => {
+      await w.writeEvent({
+        event: 'task.completed',
+        task_id: 't1',
+        base_sha: 'a'.repeat(40),
+        task_branch_tip_sha: 'b'.repeat(40),
+        task_branch_name: 'x',
+        commit_shas: ['b'.repeat(40)],
+        completed_at: new Date().toISOString(),
+        actual_cost_usd: 0.1,
+        exit_status: 'success',
+      });
+      await w.writeEvent({
+        event: 'task.started',
+        task_id: 't2',
+        worktree_path: '/tmp',
+        branch: 'x',
+        base_sha: 'a'.repeat(40),
+        subagent_id: 'sa',
+        dispatched_at: new Date().toISOString(),
+        preflight_cost_estimate_usd: 0.1,
+      });
+    });
+    // Both events on disk; readMaxSeq must reflect the actual file.
+    assert.equal(readMaxSeq(runDir), 2);
+
+    // Now simulate "sidecar behind": forcibly downgrade .seq to 1
+    // and verify readMaxSeq still returns 2 (via the scan fallback).
+    fs.writeFileSync(path.join(runDir, '.seq'), '1', 'utf8');
+    assert.equal(readMaxSeq(runDir), 2, 'scan must override stale sidecar');
+
+    // And "sidecar ahead" — set .seq to 5 (e.g. a lost-on-crash tail
+    // had advanced it). readMaxSeq returns 5 so the next append's
+    // seq is 6, leaving a gap that foldEvents will surface as a
+    // recovery signal — better than re-issuing 2-5 silently.
+    fs.writeFileSync(path.join(runDir, '.seq'), '5', 'utf8');
+    assert.equal(readMaxSeq(runDir), 5, 'sidecar must override low scan when ahead');
+  });
+
+  it('init() preserves a pre-existing events.ndjson (codex pass 2 CRITICAL)', async () => {
+    // Pre-fix: `existsSync` → `writeFileSync('')` would TRUNCATE an
+    // events file that another concurrent process had already created
+    // and appended events to. Post-fix: `wx` open with EEXIST swallow
+    // is atomic — second writer sees the existing file untouched.
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'serialized-writer-precreate-'));
+    const eventsPath = path.join(runDir, 'events.ndjson');
+    const lockPath = `${eventsPath}.writer.lock`;
+    const preExistingContent = '{"event":"task.started","seq":1}\n';
+    fs.writeFileSync(eventsPath, preExistingContent);
+    fs.writeFileSync(lockPath, '');
+
+    const w = await SerializedWriter.create({
+      eventsNdjsonPath: eventsPath,
+      writerId: testWriterId,
+      pollIntervalMs: 1,
+      maxBlockingAttempts: 100,
+    });
+    try {
+      // init() must NOT have truncated the existing file.
+      assert.equal(fs.readFileSync(eventsPath, 'utf8'), preExistingContent);
+    } finally {
+      await w.close();
+    }
   });
 
   it('sweeps stale lock dirs left by crashed prior process (bugbot pass 3)', async () => {

@@ -1,0 +1,4 @@
+configVersion: 1
+budgets:
+  perRunUSD: 5
+  legacyBudgetKey: 9

@@ -80,6 +80,7 @@ import { updateLockSeq } from './lock.ts';
 import { readMaxSeq } from './events.ts';
 import {
   RUN_STATE_SCHEMA_VERSION,
+  TERMINAL_TASK_EVENT_KIND_SET,
   type RunEvent,
   type RunEventInput,
   type WriterId,
@@ -87,6 +88,74 @@ import {
 
 /** Sibling path suffix for the writer's exclusive lock. */
 const WRITER_LOCK_SUFFIX = '.writer.lock';
+
+/** Best-effort directory fsync used by `init()` to persist newly-created
+ *  directory entries (the run dir + its parent) so they survive a host
+ *  crash before the first per-event fsync lands. Errors are swallowed
+ *  because:
+ *   * macOS rejects directory fds opened RDONLY in some Node builds
+ *     (EINVAL); the file-level fsyncs still apply.
+ *   * EPERM / non-POSIX filesystems (Windows) cannot fsync directories
+ *     at all — we degrade gracefully to file-only durability.
+ *   * The dir doesn't exist (extremely shallow paths like '/') — nothing
+ *     to fsync. */
+function fsyncDirSafe(dir: string): void {
+  try {
+    const fd = fs.openSync(dir, 'r');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // intentionally swallowed — directory fsync is a best-effort safety
+    // net layered on top of per-event file fsync.
+  }
+}
+
+/** Walk from `dir` upward, returning the ancestors that DO NOT currently
+ *  exist (shallowest first). Bounded by the filesystem root so we never
+ *  loop. Used to track which directories `mkdirSync(recursive: true)`
+ *  is about to create so we can fsync each parent afterwards (Codex
+ *  pass 3 WARN #3 on PR #217). */
+function collectNonExistingAncestors(dir: string): string[] {
+  const missing: string[] = [];
+  let cur = path.resolve(dir);
+  // Guard against infinite loop on edge-case paths.
+  for (let i = 0; i < 64; i++) {
+    if (fs.existsSync(cur)) break;
+    missing.push(cur);
+    const parent = path.dirname(cur);
+    if (parent === cur) break; // root reached
+    cur = parent;
+  }
+  // Reverse so shallowest (most-distant ancestor) comes first.
+  return missing.reverse();
+}
+
+/** v8.1.1 — fsync durability policy for `events.ndjson`. Trade-off between
+ *  crash safety and append throughput.
+ *
+ *   * `'never'`  — never fsync. Matches v7.11.0 behaviour (`O_APPEND` is
+ *                  byte-atomic at the kernel but the tail of the file may
+ *                  be lost on host crash). Highest throughput.
+ *   * `'terminal'` (DEFAULT, v8.1.1) — fsync after writing any of the
+ *                  terminal task events listed in
+ *                  `TERMINAL_TASK_EVENT_KINDS`. State-transition records
+ *                  (completed / failed / merged / timeout / budget_halt)
+ *                  are durable on host crash; informational events
+ *                  (started / budget_reserved / budget_released) may be
+ *                  lost but their state is reconstructible from the next
+ *                  terminal record. Bounded perf cost: ~1 fsync per task,
+ *                  not per event.
+ *   * `'always'` — fsync after EVERY event. Highest correctness, lowest
+ *                  throughput. Use when even informational tail loss is
+ *                  unacceptable (e.g. cost audit).
+ *
+ *  Closes issue #209 (codex pass 2 finding on v7.11.0 PR #208). */
+export type Durability = 'never' | 'terminal' | 'always';
+
+const DEFAULT_DURABILITY: Durability = 'terminal';
 
 /** Default poll interval / max attempts when the lock is contended. The
  *  serialized writer is in-process most of the time, so contention is
@@ -109,6 +178,15 @@ export interface SerializedWriterOptions {
   pollIntervalMs?: number;
   /** Max retry attempts when blocking on lock. Default 240_000. */
   maxBlockingAttempts?: number;
+  /** v8.1.1 — fsync policy. Default `'terminal'` (fsync on task-terminal
+   *  events only — see {@link Durability}). Issue #209. */
+  durability?: Durability;
+  /** v8.1.1 — INTERNAL test seam. Wraps `fs.fsyncSync` so tests can
+   *  observe fsync calls without monkey-patching the frozen `node:fs`
+   *  ESM namespace (which throws "Cannot redefine property"). Production
+   *  callers MUST leave this undefined — the default is the real
+   *  `fs.fsyncSync`. */
+  __fsyncSyncImpl?: (fd: number) => void;
 }
 
 /**
@@ -135,9 +213,12 @@ export interface SerializedWriterOptions {
 export class SerializedWriter {
   private fd: number | null = null;
   private closed = false;
-  private readonly opts: Required<Omit<SerializedWriterOptions, 'runId'>> & {
+  private readonly opts: Required<Omit<SerializedWriterOptions, 'runId' | '__fsyncSyncImpl'>> & {
     runId?: string;
+    durability: Durability;
   };
+  /** Test seam — see {@link SerializedWriterOptions.__fsyncSyncImpl}. */
+  private readonly fsyncSync: (fd: number) => void;
 
   private constructor(opts: SerializedWriterOptions) {
     this.opts = {
@@ -147,7 +228,9 @@ export class SerializedWriter {
       runId: opts.runId,
       pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_MS,
       maxBlockingAttempts: opts.maxBlockingAttempts ?? DEFAULT_MAX_ATTEMPTS,
+      durability: opts.durability ?? DEFAULT_DURABILITY,
     };
+    this.fsyncSync = opts.__fsyncSyncImpl ?? fs.fsyncSync;
   }
 
   /** Construct a writer and prime the file descriptor. The events file and
@@ -159,17 +242,80 @@ export class SerializedWriter {
   }
 
   private async init(): Promise<void> {
-    // Ensure run dir exists.
-    fs.mkdirSync(path.dirname(this.opts.eventsNdjsonPath), { recursive: true });
+    // Ensure run dir exists. Codex pass 3 WARNING #3 on PR #217: when
+    // `mkdirSync(..., { recursive: true })` creates multiple missing
+    // ancestors (e.g. `/runs/company/run-id` from scratch), the
+    // directory ENTRY for each newly-created intermediate also needs
+    // its parent fsync'd. Track which ancestors didn't exist before
+    // the mkdir so the durability sweep below can fsync each parent.
+    const runDir = path.dirname(this.opts.eventsNdjsonPath);
+    const ancestorsBeforeMkdir = collectNonExistingAncestors(runDir);
+    fs.mkdirSync(runDir, { recursive: true });
 
-    // Ensure events file exists (open for append creates it but
-    // proper-lockfile's stat-then-lock needs the lock target to exist too).
-    if (!fs.existsSync(this.opts.eventsNdjsonPath)) {
-      fs.writeFileSync(this.opts.eventsNdjsonPath, '');
+    // Ensure events + lock files exist. Codex pass 2 CRITICAL on PR
+    // #217: the prior `existsSync` → `writeFileSync('')` pattern was
+    // racy across concurrent processes — two scheduler processes could
+    // both observe the file as missing, the first appends events, then
+    // the second calls `writeFileSync('', '')` and TRUNCATES the audit
+    // log. Fix by using `O_CREAT | O_EXCL` (`wx`) which atomically
+    // creates the file only when it doesn't exist, returning EEXIST
+    // otherwise. We treat EEXIST as authoritative "another writer
+    // created it" — we never truncate.
+    let createdEventsFile = false;
+    try {
+      const fd = fs.openSync(this.opts.eventsNdjsonPath, 'wx');
+      fs.closeSync(fd);
+      createdEventsFile = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
     }
-    if (!fs.existsSync(this.opts.lockPath)) {
-      fs.writeFileSync(this.opts.lockPath, '');
+    try {
+      const fd = fs.openSync(this.opts.lockPath, 'wx');
+      fs.closeSync(fd);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
     }
+
+    // v8.1.1 — fsync the run directory so the events.ndjson directory
+    // entry (and any prior writer's tail data) is durable on disk.
+    // Skipped under `durability: 'never'` to preserve v7.11.0 behavior.
+    //
+    // Codex pass 2 WARNING #3 on PR #217: doing this only when WE
+    // created the file leaves a window where another process created
+    // it but hadn't yet fsynced the parent directory. We always fsync
+    // the run dir under durable mode, regardless of who created the
+    // file — the cost is one extra fsync per writer-startup, which is
+    // amortized across the run.
+    //
+    // Codex pass 2 WARNING #2 on PR #217: if `runDir` ITSELF was newly
+    // created by our `mkdirSync(recursive: true)`, the directory entry
+    // for runDir needs `path.dirname(runDir)` fsync'd too — otherwise
+    // the runDir itself can disappear on crash. We do that as well.
+    //
+    // NB: directory fsync uses `fs.fsyncSync` DIRECTLY, not the
+    // injectable `this.fsyncSync` test seam — the setup-time fsync is
+    // not part of the per-event hot path the durability tests observe.
+    if (this.opts.durability !== 'never') {
+      fsyncDirSafe(runDir);
+      // For each newly-created ancestor (top-down: shallowest first),
+      // fsync its parent directory so the new entry survives crash.
+      // Covers the "any of /runs, /runs/company, /runs/company/<id>
+      // disappears" case (Codex pass 3 WARN #3 on PR #217).
+      for (const newlyCreatedDir of ancestorsBeforeMkdir) {
+        fsyncDirSafe(path.dirname(newlyCreatedDir));
+      }
+      // Also fsync the immediate parent of runDir even when runDir
+      // pre-existed — covers the case where another writer raced us
+      // and created runDir before our existsSync check ran (codex
+      // pass 2 #2).
+      fsyncDirSafe(path.dirname(runDir));
+    }
+    // Suppress unused-warning when durability='never' skipped both calls.
+    void createdEventsFile;
 
     // Sweep stale lock dirs from prior crashed processes. proper-lockfile
     // creates `<lockPath>.lock` as a directory and unlinks it on release.
@@ -281,11 +427,45 @@ export class SerializedWriter {
     // atomic at the kernel boundary. Our events fit well under that.
     const buf = Buffer.from(JSON.stringify(fullEvent) + '\n', 'utf8');
     fs.writeSync(this.fd, buf, 0, buf.length);
-    fs.fsyncSync(this.fd);
+
+    // v8.1.1 — durability policy. `'never'` skips the fsync entirely
+    // (v7.11.0 behaviour — fastest, may lose tail on host crash).
+    // `'terminal'` (default) fsyncs only after state-transition events.
+    // `'always'` fsyncs every event. The fsync MUST happen BEFORE the
+    // lock is released (handled by `withLock`'s try/finally) so the
+    // next acquirer sees the kernel-flushed state. Issue #209.
+    const eventKind = (fullEvent as { event?: string }).event;
+    const shouldFsync =
+      this.opts.durability === 'always' ||
+      (this.opts.durability === 'terminal' &&
+        typeof eventKind === 'string' &&
+        TERMINAL_TASK_EVENT_KIND_SET.has(eventKind));
+    if (shouldFsync) {
+      this.fsyncSync(this.fd);
+    }
 
     // Best-effort seq sidecar + lock-seq advance. These mirror what
     // `appendEvent` in events.ts does so the rest of the run-state engine
     // sees a consistent view.
+    //
+    // Durability story for the sidecar (codex pass 3 CRITICAL on PR
+    // #217): the .seq sidecar is NOT authoritative — events.ndjson is.
+    // Under default `durability: 'terminal'`, an informational event
+    // may write seq=3 to events.ndjson WITHOUT fsync, then advance
+    // .seq to 3 here.
+    //   * Crash before flush: events.ndjson loses seq 3, .seq=3 →
+    //     sidecar ahead of disk. Next append might write seq 4 with
+    //     a gap. Caught by readMaxSeq via `max(sidecar, scan)` —
+    //     we made `readMaxSeq` scan the file and take the larger
+    //     value, so the gap-detection in `foldEvents` is preserved.
+    //   * Clean restart: events.ndjson has seq 3, .seq might be 2
+    //     (if seq 3 was informational and we'd previously gated this
+    //     update on `shouldFsync`). Same `max(sidecar, scan)` fix
+    //     ensures readMaxSeq returns 3, so the next append is seq 4
+    //     (no duplicate).
+    // Net: ALWAYS advance the sidecar; the read-side fix in
+    // `readMaxSeq` makes it crash-safe. Matches v7.11.0 write
+    // semantics for back-compat.
     try {
       fs.writeFileSync(path.join(runDir, '.seq'), String(seq), 'utf8');
     } catch {
