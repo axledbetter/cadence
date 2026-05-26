@@ -363,6 +363,30 @@ describe('classify — lexer-incomplete files refuse bypass and pinning', () => 
     assert.equal(r.pinned, false, 'pinning refused on lexer-incomplete file');
     assert.equal(r.bypassed, false, 'bypass refused on lexer-incomplete file');
   });
+  // Table-driven assertion that EVERY annotation path is refused when
+  // lexer is incomplete — regression guard for a future maintainer who
+  // might accidentally allow classify=contract or classify=destructive
+  // to set `pinned` (the previous patch comment mentioned both).
+  const annotationsThatMustNotBypass = [
+    'classify=additive',
+    'classify=expand',
+    'classify=destructive',
+    'classify=contract',
+    'classify=destructive_allowed_reason=incident=1234 attempt to sneak through',
+  ];
+  for (const ann of annotationsThatMustNotBypass) {
+    it(`unterminated comment + "${ann}" is refused`, () => {
+      const sql = `-- @autopilot: ${ann}\n/* never closed\nDROP TABLE foo;`;
+      const r = classify(sql);
+      assert.equal(r.lexerComplete, false, 'lexer is incomplete');
+      assert.equal(r.classification, 'ambiguous', 'classification forced to ambiguous');
+      assert.equal(r.pinned, false, 'pinning refused');
+      assert.equal(r.pinnedAs, null);
+      assert.equal(r.bypassed, false, 'bypass refused');
+      assert.equal(r.bypassReason, null);
+    });
+  }
+
   it('unterminated string + bypass annotation does not pass', () => {
     const sql =
       '-- @autopilot: classify=destructive_allowed_reason=incident=1234 sneak attempt\n' +
