@@ -1,0 +1,18 @@
+# small-team — 2-10 developers, human PR review expected.
+#
+# Codex passes are lighter (0 / 1 / 2) because humans review every PR before
+# merge. Auto-merge is OFF — PRs await explicit human approval. The PR
+# template prompts for reviewer assignment.
+profile: small-team
+description: 2-10 dev team with human PR review and branch protection.
+codex_passes:
+  low: 0
+  medium: 1
+  high: 2
+auto_merge: false
+require_risk_frontmatter: false
+pause_at_steps: []
+audit_log_path: null
+codex_explanations: false
+pr_template_path: presets/profiles/templates/small-team-pr-template.md
+contributor_policy: null

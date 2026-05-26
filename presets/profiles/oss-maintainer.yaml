@@ -1,0 +1,21 @@
+# oss-maintainer — open-source project receiving community contributions.
+#
+# External contributor PRs get an extra Codex pass on the high-risk tier
+# (external_high_codex_passes overrides codex_passes.high) via the
+# `gh api orgs/<base-org>/members/<pr-author>` membership check. Auto-merge
+# is OFF — maintainers retain final review authority.
+profile: oss-maintainer
+description: Open-source project with community contributions; external PRs get an extra high-tier Codex pass.
+codex_passes:
+  low: 1
+  medium: 2
+  high: 2
+auto_merge: false
+require_risk_frontmatter: false
+pause_at_steps: []
+audit_log_path: null
+codex_explanations: false
+pr_template_path: presets/profiles/templates/oss-maintainer-pr-template.md
+contributor_policy:
+  external_high_codex_passes: 3
+  membership_provider: github-org

@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/profile.schema.json",
+  "title": "User-type profile YAML",
+  "description": "Shape of presets/profiles/<name>.yaml. Profiles overlay autopilot defaults to express user-type preferences (codex pass counts, auto-merge, PR templates, audit logging, contributor policy). Schema is exhaustive — adding a new key is a minor-version bump that requires updating this schema. Filename ↔ `profile` field matching is enforced by the resolver, not by JSON Schema (no access to external filename context).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "description", "codex_passes"],
+  "properties": {
+    "profile": {
+      "type": "string",
+      "description": "Profile identifier. Must match the file's basename (without `.yaml`); the resolver enforces filename ↔ field equivalence after schema validation.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable one-line summary surfaced by `profile show` / `profile list` and the init prompt.",
+      "minLength": 1
+    },
+    "codex_passes": {
+      "type": "object",
+      "description": "Number of Codex review passes per risk tier. Each value is an integer in [0, 5]; 0 means skip Codex review entirely for that tier.",
+      "additionalProperties": false,
+      "required": ["low", "medium", "high"],
+      "properties": {
+        "low": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Codex review passes for Low-risk specs."
+        },
+        "medium": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Codex review passes for Medium-risk specs."
+        },
+        "high": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Codex review passes for High-risk specs. May be bumped per-PR by `contributor_policy.external_high_codex_passes` for external contributors."
+        }
+      }
+    },
+    "auto_merge": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true (solo default), autopilot merges after all checks pass without waiting for human approval. When false, the run stops after Codex/bugbot and the PR awaits explicit merge."
+    },
+    "require_risk_frontmatter": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true (enterprise default), autopilot refuses to start a spec that lacks a `risk:` frontmatter field. Forces explicit risk tier declaration."
+    },
+    "pause_at_steps": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9,
+        "description": "Autopilot step number (0..9). After the listed step completes, autopilot pauses for explicit user confirmation before continuing. Used by the `learning` profile."
+      },
+      "description": "Autopilot step numbers (each 0..9, deduplicated) at which the pipeline pauses for explicit user confirmation before continuing. Empty array means no pauses (default). The `learning` profile is the only shipped profile that uses this — it explicitly carves out an exception to the otherwise-strict no-pause invariant."
+    },
+    "audit_log_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Relative DIRECTORY inside the repo (not a file path) where append-only audit logs are written as `<audit_log_path>/<run-ulid>.jsonl`. The resolver / consumer is responsible for joining the run-ulid filename — the value here names the parent directory only (e.g. `.claude/audit/`). `null` disables audit logging. Must be a POSIX-style relative path: no leading `/` (POSIX absolute), no leading drive letter `C:` (Windows absolute), no leading `\\\\` (UNC), no backslashes, and no `..` segments. The consumer pins the per-run filename to keep ULID monotonic ordering.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
+    },
+    "codex_explanations": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true (learning default), each Codex pass is followed by a second LLM pass that adds 'why this matters' prose. Additive — the raw severity / title / suggestion fields are preserved unchanged so downstream tools see the same data."
+    },
+    "pr_template_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Package-root-relative path to a PR-body Markdown template (e.g. `presets/profiles/templates/small-team-pr-template.md`). `null` falls back to the built-in default PR template. Must be a POSIX-style relative path: no leading `/` (POSIX absolute), no leading drive letter `C:` (Windows absolute), no leading `\\\\` (UNC), no backslashes, and no `..` segments.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
+    },
+    "contributor_policy": {
+      "type": ["object", "null"],
+      "default": null,
+      "description": "External-contributor overlay (oss-maintainer profile). When non-null, bumps the high-risk Codex pass count for PRs opened by non-org-members per the `gh api orgs/<org>/members/<user>` check.",
+      "additionalProperties": false,
+      "required": ["external_high_codex_passes", "membership_provider"],
+      "properties": {
+        "external_high_codex_passes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Number of high-risk Codex passes for confirmed external contributors. Replaces (does not stack with) `codex_passes.high` for those PRs."
+        },
+        "membership_provider": {
+          "type": "string",
+          "enum": ["github-org"],
+          "description": "Which membership provider to query. Only `github-org` is supported in v8.2.0; reserved enum for future providers (e.g. `gitlab-group`)."
+        }
+      }
+    }
+  }
+}

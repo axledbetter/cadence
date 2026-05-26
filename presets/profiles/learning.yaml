@@ -1,0 +1,22 @@
+# learning — slower pace with verbose explanations and check-in pauses.
+#
+# Pauses after Step 4 (validate), Step 6 (push + PR), and Step 9 (merge)
+# so a learning operator can review what just happened. Each Codex pass is
+# followed by a "why this matters" LLM rewrap (codex_explanations: true).
+#
+# Note: this is the ONE shipped profile that intentionally violates the
+# autopilot "no mid-pipeline pause" invariant — those pauses are an
+# intrinsic part of the profile's contract.
+profile: learning
+description: Slower pace with verbose explanations; pauses for confirmation after steps 4, 6, and 9.
+codex_passes:
+  low: 1
+  medium: 2
+  high: 3
+auto_merge: false
+require_risk_frontmatter: false
+pause_at_steps: [4, 6, 9]
+audit_log_path: null
+codex_explanations: true
+pr_template_path: null
+contributor_policy: null
