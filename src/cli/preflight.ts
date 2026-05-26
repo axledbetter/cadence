@@ -8,6 +8,7 @@ import { detectLLMKey, loadEnvFile, LLM_KEY_NAMES } from '../core/detect/llm-key
 import { findPackageRoot } from './_pkg-root.ts';
 import { isSdkInstalled } from '../adapters/sdk-loader.ts';
 import { findUnknownBudgetKeys, formatBudgetWarnings } from '../core/config/loader.ts';
+import type { ResolvedProfile } from '../core/profile/types.ts';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -24,6 +25,23 @@ interface Check {
 export interface DoctorResult {
   blockers: number;
   warnings: number;
+}
+
+export interface DoctorOptions {
+  /**
+   * v8.2.0 PR2 — the active profile resolved by the CLI dispatcher.
+   * The dispatcher runs `resolveProfile()` in STRICT mode before
+   * calling `runDoctor`, so by the time we get here the profile has
+   * already passed every hard gate (unknown name, path-traversal,
+   * schema violation, filename mismatch, YAML parse). The dispatcher
+   * fails the run BEFORE us on any of those.
+   *
+   * Optional so the function can still be invoked directly (the
+   * `isMain` branch at the bottom of this file, and tests that
+   * instantiate it without going through the CLI). Direct callers
+   * skip the Profile section.
+   */
+  profile?: ResolvedProfile;
 }
 
 /**
@@ -134,7 +152,7 @@ function collectSkills(
   }
 }
 
-export async function runDoctor(): Promise<DoctorResult> {
+export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResult> {
   const checks: Check[] = [];
 
   // 1. Node version
@@ -359,6 +377,29 @@ export async function runDoctor(): Promise<DoctorResult> {
     }
     if (check.result === 'fail') blockers++;
     if (check.result === 'warn') warnings++;
+  }
+
+  // v8.2.0 PR2 — Profile section. Surfaced only when the dispatcher
+  // resolved a profile (which it always does for the doctor verb in
+  // PR2+). Direct programmatic callers (tests, `isMain` branch below)
+  // pass no profile and skip this block. The dispatcher guarantees
+  // the profile passed every hard gate before we render it; here we
+  // just echo the resolved values so the user can confirm "what
+  // profile am I actually on right now?" without running a second
+  // `profile show`.
+  if (options.profile) {
+    const p = options.profile;
+    console.log('');
+    console.log(`\x1b[1m[doctor] Profile\x1b[0m`);
+    console.log(`  ${PASS}  Active:           ${p.name}  \x1b[2m(source: ${p.source})\x1b[0m`);
+    console.log(
+      `       \x1b[2mcodex_passes:     low=${p.config.codex_passes.low}, medium=${p.config.codex_passes.medium}, high=${p.config.codex_passes.high}\x1b[0m`,
+    );
+    console.log(`       \x1b[2mauto_merge:       ${p.config.auto_merge}\x1b[0m`);
+    console.log(
+      `       \x1b[2mpause_at_steps:   ${p.config.pause_at_steps.length === 0 ? '(none)' : p.config.pause_at_steps.join(', ')}\x1b[0m`,
+    );
+    console.log(`       \x1b[2maudit_log_path:   ${p.config.audit_log_path ?? '(disabled)'}\x1b[0m`);
   }
 
   console.log('');
