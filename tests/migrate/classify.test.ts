@@ -81,6 +81,10 @@ describe('classify — additive rules', () => {
     expectClass('CREATE INDEX CONCURRENTLY idx ON t(c);', 'additive', 'create-index-concurrently'));
   it('CREATE INDEX CONCURRENTLY IF NOT EXISTS', () =>
     expectClass('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx ON t(c);', 'additive', 'create-index-concurrently'));
+  it('CREATE INDEX IF NOT EXISTS CONCURRENTLY (swapped order, defensive)', () =>
+    expectClass('CREATE INDEX IF NOT EXISTS CONCURRENTLY idx ON t(c);', 'additive', 'create-index-concurrently'));
+  it('CREATE UNIQUE INDEX IF NOT EXISTS CONCURRENTLY (swapped order)', () =>
+    expectClass('CREATE UNIQUE INDEX IF NOT EXISTS CONCURRENTLY idx ON t(c);', 'ambiguous', 'create-unique-index-concurrent'));
   it('CREATE VIEW', () => expectClass('CREATE VIEW v AS SELECT 1;', 'additive', 'create-view'));
   it('CREATE MATERIALIZED VIEW', () =>
     expectClass('CREATE MATERIALIZED VIEW mv AS SELECT 1;', 'additive', 'create-materialized-view'));
@@ -279,6 +283,29 @@ describe('classify — annotation: bypass', () => {
       'DROP TABLE old;';
     const r = classify(sql);
     assert.equal(r.bypassed, false);
+  });
+});
+
+describe('classify — annotation extraction edge cases', () => {
+  it('annotation works after a leading block comment (bugbot)', () => {
+    // Common pattern: license/header block comment followed by -- @autopilot:
+    const sql =
+      '/* Copyright 2026 Delegance. All rights reserved. */\n' +
+      '-- @autopilot: classify=additive\n' +
+      'GRANT SELECT ON t TO authenticated;';
+    const r = classify(sql);
+    assert.equal(r.classification, 'ambiguous');
+    assert.equal(r.pinned, true, 'annotation must be parsed even when after a block comment');
+    assert.equal(r.pinnedAs, 'additive');
+  });
+  it('annotation works with mixed leading comments', () => {
+    const sql =
+      '-- header line 1\n' +
+      '/* block comment */\n' +
+      '-- @autopilot: classify=expand\n' +
+      'GRANT SELECT ON t TO authenticated;';
+    const r = classify(sql);
+    assert.equal(r.pinnedAs, 'expand');
   });
 });
 

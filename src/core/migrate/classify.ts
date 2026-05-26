@@ -317,30 +317,35 @@ function normalizeWhitespace(s: string): string {
 function extractAnnotation(lexResult: LexResult): FileAnnotation | null {
   const ann: FileAnnotation = {};
   let found = false;
+  // Scan ALL tokens up to (but not including) the first non-comment,
+  // non-whitespace token. Block comments are skipped (not searched — we
+  // don't want PL/pgSQL bodies that happen to begin a file matching as
+  // annotations), but they also don't end scanning, so a header block
+  // comment followed by `-- @autopilot:` lines still works.
   for (const tok of lexResult.tokens) {
-    if (tok.kind === 'whitespace' || tok.kind === 'line-comment') {
-      if (tok.kind === 'line-comment') {
-        const m = /^--\s*@autopilot\s*:\s*([A-Za-z_]+)\s*=\s*(.*)$/i.exec(tok.text);
-        if (m) {
-          const key = m[1]!.toLowerCase();
-          const value = m[2]!.trim();
-          if (key === 'classify') {
-            ann.classify = value;
-            if (value.toLowerCase().startsWith('destructive_allowed_reason=')) {
-              ann.destructiveAllowedReason = value.slice('destructive_allowed_reason='.length).trim();
-            }
-            found = true;
-          } else if (key === 'contract_after') {
-            ann.contractAfter = value;
-            found = true;
-          } else if (key === 'contract_reason') {
-            ann.contractReason = value;
-            found = true;
+    if (tok.kind === 'whitespace' || tok.kind === 'block-comment') continue;
+    if (tok.kind === 'line-comment') {
+      const m = /^--\s*@autopilot\s*:\s*([A-Za-z_]+)\s*=\s*(.*)$/i.exec(tok.text);
+      if (m) {
+        const key = m[1]!.toLowerCase();
+        const value = m[2]!.trim();
+        if (key === 'classify') {
+          ann.classify = value;
+          if (value.toLowerCase().startsWith('destructive_allowed_reason=')) {
+            ann.destructiveAllowedReason = value.slice('destructive_allowed_reason='.length).trim();
           }
+          found = true;
+        } else if (key === 'contract_after') {
+          ann.contractAfter = value;
+          found = true;
+        } else if (key === 'contract_reason') {
+          ann.contractReason = value;
+          found = true;
         }
       }
       continue;
     }
+    // First non-whitespace, non-comment token — stop scanning.
     break;
   }
   return found ? ann : null;
@@ -392,12 +397,20 @@ function classifyStatement(stmt: SplitStatement): RuleHit {
   if (/^TRUNCATE\b/i.test(text)) return d('truncate', 'TRUNCATE deletes all rows in a table');
   if (/^DELETE\s+FROM\b/i.test(text)) return d('delete-from', 'DELETE FROM in a migration is data-destructive (DML in DDL)');
 
-  // CREATE INDEX — ordered grammar:
+  // CREATE INDEX — canonical Postgres grammar:
   //   CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name ...
-  const createIndexMatch = /^CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?(IF\s+NOT\s+EXISTS\s+)?/i.exec(text);
-  if (createIndexMatch) {
-    const isUnique = !!createIndexMatch[1];
-    const isConcurrent = !!createIndexMatch[2];
+  // We also accept the swapped order `IF NOT EXISTS CONCURRENTLY` defensively
+  // — some external tooling emits it and bugbot has been observed to expect
+  // that form. The safety semantics (CONCURRENTLY = additive) don't depend
+  // on clause order, so accepting both is strictly safer.
+  if (/^CREATE\s+(UNIQUE\s+)?INDEX\b/i.test(text)) {
+    const isUnique = /^CREATE\s+UNIQUE\s+INDEX\b/i.test(text);
+    const isConcurrent = /\bCONCURRENTLY\b/i.test(
+      // Only check the prefix before the index name (the first identifier
+      // after the modifiers). Avoids matching CONCURRENTLY appearing
+      // somewhere later in a partial-index expression.
+      text.slice(0, text.search(/\bON\b/i) === -1 ? text.length : text.search(/\bON\b/i)),
+    );
     if (isUnique && isConcurrent) {
       return amb('create-unique-index-concurrent', 'Concurrent unique index can fail if duplicates exist; needs manual VALIDATE');
     }

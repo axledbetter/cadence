@@ -1453,7 +1453,9 @@ switch (subcommand) {
       const filePath = flag('file');
       if (!filePath) {
         console.error('error: cadence migrate classify --file=<path> is required');
-        process.exit(2);
+        // Exit code 3 = usage error (reserved by the CLI's exit-code matrix;
+        // 2 is "ambiguous SQL needs annotation", 1 is "blocked").
+        process.exit(3);
       }
       const format = (flag('format') ?? 'json') as 'json' | 'human';
       const { runMigrateClassify } = await import('./migrate-classify.ts');
