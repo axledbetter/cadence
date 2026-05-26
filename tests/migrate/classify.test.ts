@@ -370,6 +370,13 @@ describe('classify — lexer-incomplete files refuse bypass and pinning', () => 
     const r = classify(sql);
     assert.equal(r.lexerComplete, false);
     assert.equal(r.bypassed, false, 'bypass refused on lexer-incomplete file');
+    // The classification MUST stay blocking — the whole point of the
+    // lexer-incomplete short-circuit is that a malformed file can't sneak
+    // through as additive via an annotation. CLI exit code maps non-pinned
+    // ambiguous to 2 (needs annotation) — that's the contract Step 4.5
+    // relies on.
+    assert.equal(r.classification, 'ambiguous', 'classification stays ambiguous');
+    assert.equal(r.pinned, false);
   });
 });
 
