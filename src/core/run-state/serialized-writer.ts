@@ -113,6 +113,26 @@ function fsyncDirSafe(dir: string): void {
   }
 }
 
+/** Walk from `dir` upward, returning the ancestors that DO NOT currently
+ *  exist (shallowest first). Bounded by the filesystem root so we never
+ *  loop. Used to track which directories `mkdirSync(recursive: true)`
+ *  is about to create so we can fsync each parent afterwards (Codex
+ *  pass 3 WARN #3 on PR #217). */
+function collectNonExistingAncestors(dir: string): string[] {
+  const missing: string[] = [];
+  let cur = path.resolve(dir);
+  // Guard against infinite loop on edge-case paths.
+  for (let i = 0; i < 64; i++) {
+    if (fs.existsSync(cur)) break;
+    missing.push(cur);
+    const parent = path.dirname(cur);
+    if (parent === cur) break; // root reached
+    cur = parent;
+  }
+  // Reverse so shallowest (most-distant ancestor) comes first.
+  return missing.reverse();
+}
+
 /** v8.1.1 — fsync durability policy for `events.ndjson`. Trade-off between
  *  crash safety and append throughput.
  *
@@ -222,8 +242,14 @@ export class SerializedWriter {
   }
 
   private async init(): Promise<void> {
-    // Ensure run dir exists.
+    // Ensure run dir exists. Codex pass 3 WARNING #3 on PR #217: when
+    // `mkdirSync(..., { recursive: true })` creates multiple missing
+    // ancestors (e.g. `/runs/company/run-id` from scratch), the
+    // directory ENTRY for each newly-created intermediate also needs
+    // its parent fsync'd. Track which ancestors didn't exist before
+    // the mkdir so the durability sweep below can fsync each parent.
     const runDir = path.dirname(this.opts.eventsNdjsonPath);
+    const ancestorsBeforeMkdir = collectNonExistingAncestors(runDir);
     fs.mkdirSync(runDir, { recursive: true });
 
     // Ensure events + lock files exist. Codex pass 2 CRITICAL on PR
@@ -275,9 +301,17 @@ export class SerializedWriter {
     // not part of the per-event hot path the durability tests observe.
     if (this.opts.durability !== 'never') {
       fsyncDirSafe(runDir);
-      // Best-effort: the parent of runDir may also be newly created.
-      // Fsyncing it is cheap (one syscall) and covers the "new run
-      // directory disappears after host crash" case (Codex pass 2 #2).
+      // For each newly-created ancestor (top-down: shallowest first),
+      // fsync its parent directory so the new entry survives crash.
+      // Covers the "any of /runs, /runs/company, /runs/company/<id>
+      // disappears" case (Codex pass 3 WARN #3 on PR #217).
+      for (const newlyCreatedDir of ancestorsBeforeMkdir) {
+        fsyncDirSafe(path.dirname(newlyCreatedDir));
+      }
+      // Also fsync the immediate parent of runDir even when runDir
+      // pre-existed — covers the case where another writer raced us
+      // and created runDir before our existsSync check ran (codex
+      // pass 2 #2).
       fsyncDirSafe(path.dirname(runDir));
     }
     // Suppress unused-warning when durability='never' skipped both calls.
@@ -414,32 +448,33 @@ export class SerializedWriter {
     // `appendEvent` in events.ts does so the rest of the run-state engine
     // sees a consistent view.
     //
-    // Bugbot MEDIUM on PR #217 (commit 173cf31): advancing the .seq
-    // sidecar AFTER a non-fsynced write creates a durability mismatch.
-    // If the host crashes:
-    //   * events.ndjson tail (e.g. seq 48-50) wasn't durable, so on
-    //     restart the file ends at seq 47.
-    //   * .seq sidecar says 50 (we updated it post-write).
-    //   * readMaxSeq prefers the sidecar → returns 50.
-    //   * Next append writes seq 51 — gap (no seq 48-50), foldEvents
-    //     throws `corrupted_state` on replay.
-    // Fix: only advance .seq when the events line was fsync'd. Under
-    // `'never'` and informational events in `'terminal'` mode, the
-    // sidecar is intentionally left behind — readMaxSeq falls back to
-    // scanning events.ndjson on a sidecar miss, which is the
-    // authoritative source. Same logic for the lock-seq advance, which
-    // is consumed by the same read paths.
-    if (shouldFsync) {
-      try {
-        fs.writeFileSync(path.join(runDir, '.seq'), String(seq), 'utf8');
-      } catch {
-        // intentionally swallowed — the events file is authoritative
-      }
-      try {
-        updateLockSeq(runDir, seq);
-      } catch {
-        // intentionally swallowed — per-run lock may not exist in tests
-      }
+    // Durability story for the sidecar (codex pass 3 CRITICAL on PR
+    // #217): the .seq sidecar is NOT authoritative — events.ndjson is.
+    // Under default `durability: 'terminal'`, an informational event
+    // may write seq=3 to events.ndjson WITHOUT fsync, then advance
+    // .seq to 3 here.
+    //   * Crash before flush: events.ndjson loses seq 3, .seq=3 →
+    //     sidecar ahead of disk. Next append might write seq 4 with
+    //     a gap. Caught by readMaxSeq via `max(sidecar, scan)` —
+    //     we made `readMaxSeq` scan the file and take the larger
+    //     value, so the gap-detection in `foldEvents` is preserved.
+    //   * Clean restart: events.ndjson has seq 3, .seq might be 2
+    //     (if seq 3 was informational and we'd previously gated this
+    //     update on `shouldFsync`). Same `max(sidecar, scan)` fix
+    //     ensures readMaxSeq returns 3, so the next append is seq 4
+    //     (no duplicate).
+    // Net: ALWAYS advance the sidecar; the read-side fix in
+    // `readMaxSeq` makes it crash-safe. Matches v7.11.0 write
+    // semantics for back-compat.
+    try {
+      fs.writeFileSync(path.join(runDir, '.seq'), String(seq), 'utf8');
+    } catch {
+      // intentionally swallowed — the events file is authoritative
+    }
+    try {
+      updateLockSeq(runDir, seq);
+    } catch {
+      // intentionally swallowed — per-run lock may not exist in tests
     }
 
     return fullEvent;

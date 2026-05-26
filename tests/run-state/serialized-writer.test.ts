@@ -486,35 +486,17 @@ process.exit(0);
     assert.equal(ev.event, 'task.completed');
   });
 
-  it('.seq sidecar is NOT advanced for non-fsynced events (bugbot MEDIUM)', async () => {
-    // Bugbot MEDIUM finding on PR #217: if .seq sidecar is updated
-    // after a non-fsynced (informational) event, a host crash that
-    // loses the tail leaves the sidecar AHEAD of the durable events
-    // file. The next append would skip seqs and replay would throw.
-    // Fix: only update .seq when the event was fsync'd. Verify here.
+  it('readMaxSeq returns max(sidecar, scan) — sidecar-behind safe (codex pass 3 CRITICAL)', async () => {
+    // Codex pass 3 finding on PR #217: under default `'terminal'` mode,
+    // a clean restart after an informational event must NOT re-issue
+    // its seq. Verify by writing a terminal event (seq=1) then an
+    // informational event (seq=2), then reading via the same code
+    // path `appendUnderLock` uses (`readMaxSeq`). Must return 2 so
+    // the next append uses seq=3.
     const { runDir, eventsPath } = tmpRun();
-    const seqPath = path.join(runDir, '.seq');
+    const { readMaxSeq } = await import('../../src/core/run-state/events.ts');
 
     await withWriter(eventsPath, async w => {
-      // Informational event under default 'terminal' mode — fsync skipped.
-      await w.writeEvent({
-        event: 'task.started',
-        task_id: 't1',
-        worktree_path: '/tmp',
-        branch: 'x',
-        base_sha: 'a'.repeat(40),
-        subagent_id: 'sa',
-        dispatched_at: new Date().toISOString(),
-        preflight_cost_estimate_usd: 0.1,
-      });
-      // .seq must NOT have been written — durable log doesn't reflect this event.
-      assert.equal(
-        fs.existsSync(seqPath),
-        false,
-        '.seq must not exist after a non-fsynced informational event',
-      );
-
-      // Terminal event — fsync fires, .seq advances to 2.
       await w.writeEvent({
         event: 'task.completed',
         task_id: 't1',
@@ -526,8 +508,31 @@ process.exit(0);
         actual_cost_usd: 0.1,
         exit_status: 'success',
       });
-      assert.equal(fs.readFileSync(seqPath, 'utf8'), '2', '.seq must equal latest fsynced seq');
+      await w.writeEvent({
+        event: 'task.started',
+        task_id: 't2',
+        worktree_path: '/tmp',
+        branch: 'x',
+        base_sha: 'a'.repeat(40),
+        subagent_id: 'sa',
+        dispatched_at: new Date().toISOString(),
+        preflight_cost_estimate_usd: 0.1,
+      });
     });
+    // Both events on disk; readMaxSeq must reflect the actual file.
+    assert.equal(readMaxSeq(runDir), 2);
+
+    // Now simulate "sidecar behind": forcibly downgrade .seq to 1
+    // and verify readMaxSeq still returns 2 (via the scan fallback).
+    fs.writeFileSync(path.join(runDir, '.seq'), '1', 'utf8');
+    assert.equal(readMaxSeq(runDir), 2, 'scan must override stale sidecar');
+
+    // And "sidecar ahead" — set .seq to 5 (e.g. a lost-on-crash tail
+    // had advanced it). readMaxSeq returns 5 so the next append's
+    // seq is 6, leaving a gap that foldEvents will surface as a
+    // recovery signal — better than re-issuing 2-5 silently.
+    fs.writeFileSync(path.join(runDir, '.seq'), '5', 'utf8');
+    assert.equal(readMaxSeq(runDir), 5, 'sidecar must override low scan when ahead');
   });
 
   it('init() preserves a pre-existing events.ndjson (codex pass 2 CRITICAL)', async () => {

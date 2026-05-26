@@ -163,12 +163,21 @@ export function readEvents(
   return { events: result, truncatedTail, maxSeq };
 }
 
-/** Read just the highest seq from disk. Prefers the sidecar; falls back to
- *  rescanning the events file. */
+/** Read the highest seq from disk. Returns `max(sidecar, events.ndjson scan)`
+ *  so we are crash-safe both ways:
+ *    * Sidecar ahead of disk (crash before fsync, v8.1.1 default
+ *      `durability: 'terminal'` for informational events): scan returns
+ *      the durable max; sidecar is the optimistic upper bound; we take
+ *      the larger to preserve seq monotonicity for the next write — the
+ *      gap is then surfaced by `foldEvents` as expected.
+ *    * Sidecar behind disk (sidecar update raced or was skipped): scan
+ *      catches the higher event-line seq and returns it, preventing the
+ *      next append from re-issuing a sequence number.
+ *  Codex pass 3 CRITICAL on PR #217. */
 export function readMaxSeq(runDir: string): number {
-  const sidecar = readSeqSidecar(runDir);
-  if (sidecar !== null) return sidecar;
-  return readEvents(runDir).maxSeq;
+  const sidecar = readSeqSidecar(runDir) ?? 0;
+  const scan = readEvents(runDir).maxSeq;
+  return Math.max(sidecar, scan);
 }
 
 export interface AppendEventOptions {
