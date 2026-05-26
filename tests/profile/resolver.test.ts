@@ -131,6 +131,16 @@ describe('resolveProfile — precedence (file < env < flag)', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 
+  it('UTF-8 BOM at start of profile file is silently stripped (bugbot MEDIUM)', () => {
+    const cwd = mkTempCwd();
+    // Leading BOM (U+FEFF) — Windows editor default for "UTF-8 with BOM".
+    writeProfileFile(cwd, '﻿enterprise\n');
+    const r = resolveProfile({ cwd });
+    assert.equal(r.name, 'enterprise');
+    assert.equal(r.source, 'file');
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
   it('flag overrides a broken .autopilot/profile (bugbot MEDIUM)', () => {
     // Without the reverse-precedence walk, a malformed file would
     // throw before we ever looked at the flag, blocking the user's
@@ -263,6 +273,10 @@ describe('parseProfileFile — allowed forms', () => {
     'enterprise\r\n',
     'enterprise   \r\n',
     'enterprise\r\n\r\n',
+    // UTF-8 BOM (Windows editors) — bugbot MEDIUM. The leading
+    // is stripped before parsing so the visible text matches.
+    '﻿enterprise\n',
+    '﻿enterprise\r\n',
   ]) {
     it(`accepts ${JSON.stringify(allowed)}`, () => {
       assert.equal(_parseProfileFileForTest(allowed), 'enterprise');

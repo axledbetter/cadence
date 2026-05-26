@@ -46,7 +46,17 @@ import {
 
 const PROFILE_NAME_REGEX = /^[a-z0-9][a-z0-9-]*$/;
 const DEFAULT_PROFILE_NAME = 'solo';
-const ENV_VAR_NAME = 'CLAUDE_AUTOPILOT_PROFILE';
+/**
+ * Canonical env var that overrides the file layer. EXPORTED so PR2's
+ * dispatcher reads `process.env[ENV_VAR_NAME]` from a single source of
+ * truth (bugbot, low severity: "unused profile env constant" was due to
+ * resolver taking the value via options — PR2 will plumb it in).
+ */
+export const ENV_VAR_NAME = 'CLAUDE_AUTOPILOT_PROFILE';
+// U+FEFF — leading BOM that Windows editors often prepend to UTF-8 files
+// (bugbot, medium severity). Stripped from `.autopilot/profile` content
+// before parsing so `﻿enterprise` doesn't fail the regex.
+const UTF8_BOM = '﻿';
 
 // Lazy-loaded validator cache — keyed by package root so multiple roots
 // in one process (tests with synthetic roots, embedding in a daemon
@@ -274,12 +284,17 @@ function loadProfileByName(
  * well-formedness of the file).
  */
 function parseProfileFile(contents: string): string | null {
+  // Strip a leading UTF-8 BOM (`﻿`) — Windows editors often
+  // prepend it to text files, and without this step `﻿enterprise`
+  // would fail the profile-name regex even though the visible text
+  // matches (bugbot, medium severity: "UTF-8 BOM breaks profile file").
+  const normalized = contents.startsWith(UTF8_BOM) ? contents.slice(UTF8_BOM.length) : contents;
   // Split on \n; strip trailing CR (Windows CRLF) and trailing spaces +
   // tabs from each line. Without the explicit \r strip, a CRLF file
   // (`enterprise\r\n`) would carry the \r into the candidate name and
   // trip the embedded-whitespace check below — Windows users would never
   // be able to use the file (bugbot, medium severity).
-  const lines = contents.split('\n').map(l => l.replace(/[ \t\r]+$/, ''));
+  const lines = normalized.split('\n').map(l => l.replace(/[ \t\r]+$/, ''));
   const nonEmpty = lines.filter(l => l.length > 0);
   if (nonEmpty.length === 0) {
     // Empty / whitespace-only file — treat as unset.
