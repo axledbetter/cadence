@@ -24,7 +24,7 @@
 >
 > The old npm package is deprecated but still installable; the GitHub repo at `axledbetter/claude-autopilot` redirects to `axledbetter/cadence`.
 
-**The automated coding harness.** Multi-model role split (Claude writes, Codex reviews, Cursor bugbot triages). Risk-tiered review depth. Concurrent multi-PR dispatch. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge, from your terminal, on your codebase, with your test suite.
+**The multi-model coding harness.** Claude writes, Codex reviews, Cursor bugbot triages — role-split orchestration across 16+ providers (Anthropic, OpenAI, Google, Groq, Ollama, Bedrock, Azure, Cohere, Mistral, plus any OpenAI-compatible endpoint). Risk-tiered review depth. Concurrent multi-PR dispatch. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge, from your terminal, on your codebase, with your test suite.
 
 **Open source, MIT-licensed, runs on your machine with your API keys.** No hosted agent, no per-seat subscription — `npm install -g @delegance/cadence@latest` and you're done.
 

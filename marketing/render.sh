@@ -23,7 +23,7 @@ magick -size "${W}x${H}" "xc:#1a1b26" \
   -font /System/Library/Fonts/SFNSMono.ttf \
   -gravity center \
   -fill "#c0caf5" -pointsize 64 -annotate +0-30 "Cadence" \
-  -fill "#7aa2f7" -pointsize 22 -annotate +0+30 "the automated coding harness for Claude Code" \
+  -fill "#7aa2f7" -pointsize 22 -annotate +0+30 "the multi-model automated coding harness" \
   -fill "#565f89" -pointsize 16 -annotate +0+80 "v8.4.0  .  @delegance/cadence  .  MIT" \
   marketing/_build/title.png
 
