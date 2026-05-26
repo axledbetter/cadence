@@ -139,4 +139,32 @@ describe('two-level help text', () => {
       `CLI \`help deploy\` leaked the Pipeline group — should be focused.\nstdout head:\n${r.stdout.slice(0, 400)}`,
     );
   });
+
+  it('HT8: help council prints the council Options block with all documented flags', () => {
+    // Regression guard for issue #29 (LOW finding) — council was added to
+    // HELP_GROUPS but had no HELP_OPTIONS entry, so `cadence help council`
+    // showed zero flag-level help. This locks in the populated block + the
+    // stable section anchors (Behavior/Exit codes/Examples) so accidental
+    // truncation in a future edit still trips the test.
+    const focused = buildCommandHelpText('council');
+    assert.ok(focused !== null, 'buildCommandHelpText("council") returned null');
+    assert.ok(focused!.includes('Options (council):'), 'focused help missing Options (council):');
+    for (const flag of ['--prompt', '--context-file', '--config', '--dry-run', '--no-synthesize', '--json']) {
+      assert.ok(focused!.includes(flag), `focused help missing ${flag} flag`);
+    }
+    for (const anchor of ['Behavior:', 'Exit codes:', 'Examples:']) {
+      assert.ok(focused!.includes(anchor), `focused help missing ${anchor} section`);
+    }
+  });
+
+  it('HT9: `help council` invoked through the CLI prints the council Options block', () => {
+    // End-to-end mirror of HT7 — guarantees the dispatch case wires
+    // buildCommandHelpText for the council verb, not just the helper.
+    const r = runCli(['help', 'council']);
+    assert.equal(r.code, 0, `expected exit 0, got ${r.code}. stderr:\n${r.stderr}`);
+    assert.ok(
+      r.stdout.includes('Options (council):'),
+      `CLI \`help council\` did not include the council Options block.\nstdout head:\n${r.stdout.slice(0, 400)}`,
+    );
+  });
 });

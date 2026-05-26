@@ -293,6 +293,32 @@ export const HELP_OPTIONS: Record<string, string> = {
         for the resume gate.`,
   'migrate-doctor': `Options (migrate doctor / migrate-doctor):
   --fix                Apply auto-fixable mutations (legacy stack.md, skills/migrate/, schema_version)`,
+  council: `Options (council):
+  --prompt <text>          Question for the council to deliberate on (required unless --dry-run)
+  --context-file <path>    File whose contents form the shared conversation context (required unless --dry-run)
+  --config <path>          Path to config file (default: ./guardrail.config.yaml)
+  --dry-run                Print the resolved council config as JSON and exit (no model calls)
+  --no-synthesize          Run advisors but skip the synthesizer call (stub returns empty text)
+  --json                   Wrap stdout in the standard envelope (\`{ command: "council", ... }\`)
+
+  Behavior: dispatches the prompt + context to N advisor models declared in
+            \`council.models\` (guardrail.config.yaml), then forwards the
+            structured advisor responses to the synthesizer declared in
+            \`council.synthesizer\`. Stdout is always the JSON result envelope
+            (schema_version, run_id, status, per-advisor responses, optional
+            synthesis); \`--json\` additionally wraps it in the standard CLI
+            command envelope used by other verbs. Run cost is recorded so
+            \`cadence costs\` reflects council runs.
+
+  Exit codes: 0 success; 1 partial (synthesizer failed but advisors succeeded);
+              2 failed (fewer than \`council.minSuccessfulResponses\`
+              advisors succeeded); 1 also for config-load / IO / argument
+              errors that abort before dispatch.
+
+  Examples:
+    cadence council --dry-run
+    cadence council --prompt "Should we use X or Y?" --context-file ./design.md
+    cadence council --prompt "..." --context-file ./ctx.md --no-synthesize --json`,
   runs: `Sub-verbs (runs):
   runs list                              List runs newest-first
   runs show <id>                         Show a run's state + last events
