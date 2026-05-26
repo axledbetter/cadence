@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/frontend-quality.schema.json",
+  "title": ".autopilot/frontend-quality.json",
+  "description": "Per-project configuration for the Layer 2 deterministic frontend audit (scripts/audit-frontend.ts). All fields are optional; absent fields fall back to defaults. additionalProperties is false at every level to catch config typos that would silently disable rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "componentLibrary": {
+      "description": "Informational metadata for future Layer 1 playbook customization. Not consumed by the v1 audit script.",
+      "type": "string",
+      "enum": ["shadcn", "mui", "chakra", "mantine", "antd", "bootstrap", "custom", "auto"]
+    },
+    "themeFiles": {
+      "description": "Informational; reserved for future stack-detection / playbook use. Not used by the v1 audit. For raw-color allowlisting, use rawColorAllowedFiles.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/repoRelativePath" }
+    },
+    "rawColorAllowedFiles": {
+      "description": "Glob patterns (minimatch) for files where forbidRawColorLiterals is intentionally skipped. All other rules still apply to these files.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/repoRelativeGlob" }
+    },
+    "rules": {
+      "description": "Per-rule toggle map. All rules default to true except forbidMagicSpacing (false).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "forbidRawColorLiterals": { "type": "boolean" },
+        "requireAltOnImg": { "type": "boolean" },
+        "requireAriaLabelOnIconButton": { "type": "boolean" },
+        "forbidInteractiveDiv": { "type": "boolean" },
+        "requireLabelForInput": { "type": "boolean" },
+        "forbidMagicSpacing": { "type": "boolean" }
+      }
+    },
+    "ignorePaths": {
+      "description": "Glob patterns (minimatch). Files matching any pattern are excluded BEFORE extension filtering, so test/story files can be skipped wholesale.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/repoRelativeGlob" }
+    },
+    "buttonComponents": {
+      "description": "Component names treated as button-like by requireAriaLabelOnIconButton. Defaults: button, Button, IconButton, DropdownMenuTrigger, TooltipTrigger, PopoverTrigger, SheetTrigger, AlertDialogTrigger, DialogTrigger.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "selfLabelingInputComponents": {
+      "description": "Component names exempted from requireLabelForInput (assumed to self-label). Defaults: FormControl, TextField, RadioGroup.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "repoRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repo-root-relative path. No leading slash, no '..' segments.",
+      "not": {
+        "anyOf": [
+          { "pattern": "^/" },
+          { "pattern": "(^|/)\\.\\.(/|$)" }
+        ]
+      }
+    },
+    "repoRelativeGlob": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repo-root-relative glob (minimatch). No leading slash, no '..' segments.",
+      "not": {
+        "anyOf": [
+          { "pattern": "^/" },
+          { "pattern": "(^|/)\\.\\.(/|$)" }
+        ]
+      }
+    }
+  }
+}

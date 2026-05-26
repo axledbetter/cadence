@@ -18,3 +18,10 @@ Things that should flag CRITICAL:
 - Weaviate queries without .withTenant()
 - Secrets committed to code
 - RLS policy DROP without replacement
+
+Frontend quality (optional layer — issue #178):
+- Run `npm run audit:frontend` for a deterministic AST audit of `.tsx`/`.jsx`
+  in the PR diff (raw color literals, missing alt, icon-only buttons without
+  aria-label, interactive divs without keyboard support, unlabeled inputs).
+- The matching impl-agent playbook lives at
+  `skills/frontend-impl-playbook/SKILL.md`. Read it before writing UI.
