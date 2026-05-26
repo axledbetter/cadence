@@ -33,6 +33,10 @@ import { runMigrateDoctor } from './migrate-doctor.ts';
 import { initMigrate, NoMigrationToolDetectedError } from './init-migrate.ts';
 import { runMigrate } from './migrate.ts';
 import { runDeploy, runDeployRollback, runDeployStatus } from './deploy.ts';
+import { runProfileCommand } from './profile.ts';
+import { resolveProfile } from '../core/profile/resolver.ts';
+import { ProfileResolutionError, type ResolvedProfile } from '../core/profile/types.ts';
+import { ENV_VAR_NAME as PROFILE_ENV_VAR_NAME } from '../core/profile/resolver.ts';
 import { findPackageRoot } from './_pkg-root.ts';
 import { GuardrailError } from '../core/errors.ts';
 import { buildHelpText, buildCommandHelpText } from './help-text.ts';
@@ -233,7 +237,7 @@ These are aliases for the flat subcommands; they still work without the 'advance
 // gc, delete, doctor) are dispatched inside its case block. The singular
 // `run resume` form is handled BEFORE the default `run` -> review dispatch
 // kicks in (see disambiguation block just below).
-const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'examples', 'internal', 'help', '--help', '-h'] as const;
+const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'examples', 'profile', 'internal', 'help', '--help', '-h'] as const;
 const VALUE_FLAGS = ['base', 'config', 'files', 'format', 'output', 'debounce', 'ask', 'focus', 'fail-on', 'note', 'reason', 'expires', 'profile', 'severity', 'prompt', 'context-file', 'path', 'adapter', 'ref', 'sha', 'spec', 'context', 'mode', 'phases', 'budget', 'stack'];
 
 // Bare invocation — no subcommand, no flags → show welcome guide
@@ -282,8 +286,56 @@ aliases for the entire v8.x line. To migrate from the old npm package:
 // remains the legacy review-phase entry point. We rewrite the head to a
 // synthetic 'run-resume' subcommand so the existing 'run' case keeps doing
 // `runReview` and we don't need to special-case it inside the review path.
-let subcommand = (args[0] && !args[0].startsWith('--')) ? args[0] : 'run';
-if (subcommand === 'run' && args[1] === 'resume') {
+//
+// v8.2.0 PR2 — the global `--profile <name>` flag may appear BEFORE the
+// subcommand (`cadence --profile small-team autopilot spec.md`). We walk
+// past leading occurrences of THIS specific global flag only — NOT every
+// `VALUE_FLAGS` entry. The narrower scope avoids changing dispatch for
+// invocations like `cadence --adapter vercel deploy` which were already
+// legal under the previous "default to run" heuristic and should keep
+// routing the way they did (a leading verb-local flag short-circuits to
+// the `run` case, which is intentional fallthrough behavior).
+//
+// Supports both `--profile <name>` and `--profile=<name>` shapes. The
+// `=`-form is a single token; the space-form consumes two.
+const GLOBAL_PRE_SUBCOMMAND_FLAGS = ['profile'] as const;
+function findSubcommandIndex(): number {
+  let i = 0;
+  while (i < args.length) {
+    const tok = args[i];
+    if (!tok || !tok.startsWith('--')) return i;
+    // `--key=val` is a single token — only skip if it's a known
+    // pre-subcommand global flag.
+    if (tok.includes('=')) {
+      const name = tok.slice(2, tok.indexOf('='));
+      if ((GLOBAL_PRE_SUBCOMMAND_FLAGS as readonly string[]).includes(name)) {
+        i += 1;
+        continue;
+      }
+      // Not a global flag — stop hopping; the existing
+      // "default to run" branch handles it (preserved behavior).
+      return i;
+    }
+    const name = tok.slice(2);
+    if ((GLOBAL_PRE_SUBCOMMAND_FLAGS as readonly string[]).includes(name)) {
+      // Skip the flag AND its value. If the value is missing or is
+      // itself a flag, the dedicated `getGlobalProfileFlag()` surfaces
+      // a typed error later — we just don't want to count the next
+      // token as the subcommand here.
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith('--')) { i += 2; continue; }
+      i += 1;
+      continue;
+    }
+    // Non-global flag at the head — preserve the legacy
+    // "default to run" behavior by stopping the scan.
+    return i;
+  }
+  return args.length;
+}
+const subcommandIdx = findSubcommandIndex();
+let subcommand = (args[subcommandIdx] && !args[subcommandIdx]!.startsWith('--')) ? args[subcommandIdx]! : 'run';
+if (subcommand === 'run' && args[subcommandIdx + 1] === 'resume') {
   subcommand = 'run-resume';
 }
 
@@ -302,6 +354,118 @@ function flag(name: string): string | undefined {
 function boolFlag(name: string): boolean {
   return args.includes(`--${name}`);
 }
+
+/**
+ * v8.2.0 PR2 — global `--profile <name>` flag.
+ *
+ * Read once at top-of-dispatch and forwarded into `resolveProfile()` for
+ * profile-resolution-required subcommands (autopilot, run, validate, pr,
+ * doctor, profile show). The empty-string + path-traversal gates live in
+ * `resolveProfile()` / `validateProfileNameAgainstAvailableStems()` (so
+ * the resolver tests cover them); the dispatcher just plumbs the value
+ * through.
+ *
+ * Returns `undefined` if the flag is absent (resolver falls through to
+ * env → file → default). Returns the verbatim string otherwise — even
+ * `--profile ""`, which `resolveProfile()` then rejects with a typed
+ * `parse_error` (NOT `path_traversal` — bugbot LOW remediation hint
+ * lives at the resolver layer).
+ *
+ * Important: the existing `setup --profile <security-strict|team|solo>`
+ * accepts a DIFFERENT namespace (legacy preset overlay) and parses the
+ * flag locally inside its case block. The two namespaces only overlap
+ * on the literal `solo`. Setup is NOT in the
+ * profile-resolution-required list, so `getGlobalProfileFlag()` does
+ * not fire for the setup path.
+ */
+function getGlobalProfileFlag(): string | undefined {
+  // Scan argv ONCE so we can:
+  //  - collect every `--profile <name>` and `--profile=<name>`
+  //    occurrence (both shapes — bug-bot pass 1 #3 flagged the
+  //    `=`-form silently dropping the value),
+  //  - hard-fail on duplicate occurrences (bug-bot pass 1 #5 —
+  //    "last one wins" silently masks user mistakes; require an
+  //    explicit single source of truth),
+  //  - return the empty string for a missing value so the
+  //    resolver surfaces the typed parse_error + remediation
+  //    hint (instead of a generic stderr exit-1 from `flag()`).
+  const occurrences: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const tok = args[i];
+    if (tok === undefined) continue;
+    if (tok === '--profile') {
+      const val = args[i + 1];
+      if (val === undefined || val.startsWith('--')) {
+        occurrences.push('');
+        // Don't increment i — the next token is another flag, not
+        // a consumed value.
+      } else {
+        occurrences.push(val);
+        i += 1;
+      }
+      continue;
+    }
+    if (tok.startsWith('--profile=')) {
+      occurrences.push(tok.slice('--profile='.length));
+      continue;
+    }
+  }
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    process.stderr.write(
+      `\x1b[31m[cadence] --profile specified ${occurrences.length} times — only one value is allowed.\x1b[0m\n`,
+    );
+    process.stderr.write(
+      `\x1b[2m  values: ${occurrences.map(v => v === '' ? '<empty>' : v).join(', ')}\x1b[0m\n`,
+    );
+    process.exit(1);
+  }
+  return occurrences[0];
+}
+
+/**
+ * Resolve the active profile for profile-resolution-required
+ * subcommands (autopilot, run, validate, pr, doctor, profile show).
+ *
+ * STRICT mode (the only mode in PR2): any `ProfileResolutionError` is
+ * surfaced as a one-line stderr message + exit 1. The spec's
+ * `--strict-profile` knob is reserved for future deprecation warnings
+ * (v8.3.0+) and is intentionally a no-op in PR2; we accept the flag
+ * silently for forward-compat but do not branch on it.
+ *
+ * Returns the `ResolvedProfile` so callers can wire it into a context
+ * object once downstream consumers exist (PR3+). PR2 only USES the
+ * resolved profile inside `doctor` + `profile show` — the
+ * autopilot/run/validate/pr dispatch paths invoke `resolveProfile()`
+ * for its side effect (early failure on bad config) and let the
+ * existing handler proceed; the actual codex_passes / pause_at_steps
+ * wiring lands in PR3.
+ */
+function resolveActiveProfileOrExit(): ResolvedProfile {
+  try {
+    return resolveProfile({
+      cwd: process.cwd(),
+      envProfile: process.env[PROFILE_ENV_VAR_NAME],
+      ...(globalProfileFlag !== undefined ? { flagProfile: globalProfileFlag } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ProfileResolutionError) {
+      process.stderr.write(`\x1b[31m[cadence] profile error (${err.code}): ${err.message}\x1b[0m\n`);
+      if (err.hint) {
+        process.stderr.write(`\x1b[2m  hint: ${err.hint}\x1b[0m\n`);
+      }
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+// Read the global flag ONCE at top-of-dispatch so all the
+// `resolveActiveProfileOrExit()` callers see a consistent value (no
+// risk of `args` having been mutated by a verb-specific shift between
+// reads). The flag stays present in `args` so verb-local parsers
+// (notably `setup`'s own --profile) still see it.
+const globalProfileFlag = getGlobalProfileFlag();
 
 /**
  * v7.0 — `--no-engine` removed; `--engine` becomes a no-op shim with a
@@ -506,6 +670,13 @@ switch (subcommand) {
   case 'doctor':
   case 'preflight': {
     const json = boolFlag('json');
+    // v8.2.0 PR2 — doctor is profile-resolution-required in STRICT
+    // mode. Any hard profile error (unknown name, path-traversal,
+    // schema violation, filename mismatch, YAML parse) fails doctor
+    // unconditionally. The `--strict-profile` flag is reserved for
+    // future deprecation warnings (v8.3.0+) and is silently accepted
+    // here for forward-compat.
+    const resolvedProfile = resolveActiveProfileOrExit();
     let docResult: Awaited<ReturnType<typeof runDoctor>> | null = null;
     const code = await runUnderJsonMode(
       {
@@ -514,10 +685,18 @@ switch (subcommand) {
         payload: () => docResult ? {
           blockers: docResult.blockers,
           warnings: docResult.warnings,
+          profile: {
+            name: resolvedProfile.name,
+            source: resolvedProfile.source,
+            codex_passes: resolvedProfile.config.codex_passes,
+            auto_merge: resolvedProfile.config.auto_merge,
+            pause_at_steps: resolvedProfile.config.pause_at_steps,
+            audit_log_path: resolvedProfile.config.audit_log_path,
+          },
         } : {},
       },
       async () => {
-        docResult = await runDoctor();
+        docResult = await runDoctor({ profile: resolvedProfile });
         return docResult.blockers > 0 ? 1 : 0;
       },
     );
@@ -559,6 +738,11 @@ switch (subcommand) {
   }
 
   case 'run': {
+    // v8.2.0 PR2 — profile-resolution-required. STRICT: hard-fail on
+    // any ProfileResolutionError. The resolved value isn't plumbed
+    // into runCommand yet (PR3 wires codex_passes / auto_merge /
+    // pause_at_steps); this call is the early-error gate.
+    resolveActiveProfileOrExit();
     const base = flag('base');
     const config = flag('config');
     const filesArg = flag('files');
@@ -652,6 +836,9 @@ switch (subcommand) {
   }
 
   case 'pr': {
+    // v8.2.0 PR2 — profile-resolution-required (STRICT). Early-error
+    // gate; the resolved profile isn't plumbed into runPr yet.
+    resolveActiveProfileOrExit();
     // v6.0.9 — engine-wrap shell for the `pr` pipeline phase. Side-effecting
     // (posts/updates a PR comment + inline review comments via the `gh` CLI
     // inside runCommand). Declared `idempotent: false, hasSideEffects: true`
@@ -866,6 +1053,9 @@ switch (subcommand) {
   }
 
   case 'validate': {
+    // v8.2.0 PR2 — profile-resolution-required (STRICT). Early-error
+    // gate; the resolved profile isn't plumbed into runValidate yet.
+    resolveActiveProfileOrExit();
     // v6.0.5 — engine-wrap shell for the `validate` pipeline phase. The
     // actual validation pipeline (static checks, auto-fix, tests, Codex
     // review with auto-fix, bugbot triage) lives in the Claude Code
@@ -927,6 +1117,10 @@ switch (subcommand) {
   }
 
   case 'autopilot': {
+    // v8.2.0 PR2 — profile-resolution-required (STRICT). Early-error
+    // gate; the resolved profile isn't plumbed into runAutopilot yet
+    // (PR3 wires it into the skill content).
+    resolveActiveProfileOrExit();
     // v6.2.0 — multi-phase orchestrator. One runId across all phases.
     // Engine-on REQUIRED (rejected at pre-flight if --no-engine / env=off
     // / config=false). v6.2.0 ships --mode=full (scan → spec → plan →
@@ -1051,10 +1245,33 @@ switch (subcommand) {
 
   case 'setup': {
     const force = args.includes('--force');
-    const profileArg = flag('profile');
+    // bugbot MEDIUM, PR #220: setup's --profile namespace (legacy
+    // preset overlay: security-strict|team|solo) collides with the
+    // v8.2.0 user-type --profile (solo|small-team|oss-maintainer|
+    // enterprise|learning). Without scoping the lookup, a global
+    // `cadence --profile small-team setup` would route to this case
+    // (setup is profile-resolution-OPTIONAL, so it doesn't fire the
+    // resolver), then `flag('profile')` would scan the entire argv,
+    // see `small-team`, and exit with the wrong error.
+    //
+    // Fix: only honor a setup --profile that appears AFTER the
+    // `setup` keyword. A global --profile placed before `setup` is
+    // intentionally ignored — setup isn't a profile-runtime-required
+    // verb, so the global value has no behavioral effect here. Users
+    // who want the legacy overlay must place the flag locally.
+    const setupArgs = args.slice(subcommandIdx + 1);
+    const localProfileIdx = setupArgs.indexOf('--profile');
+    const localProfileEq = setupArgs.find(a => a.startsWith('--profile='));
+    let profileArg: string | undefined;
+    if (localProfileEq !== undefined) {
+      profileArg = localProfileEq.slice('--profile='.length);
+    } else if (localProfileIdx >= 0) {
+      const val = setupArgs[localProfileIdx + 1];
+      if (val !== undefined && !val.startsWith('--')) profileArg = val;
+    }
     const json = boolFlag('json');
     if (profileArg && !['security-strict', 'team', 'solo'].includes(profileArg)) {
-      console.error(`\x1b[31m[claude-autopilot] --profile must be "security-strict", "team", or "solo"\x1b[0m`);
+      console.error(`\x1b[31m[claude-autopilot] setup --profile must be "security-strict", "team", or "solo" (legacy preset overlay; distinct from the v8.2.0 user-type --profile)\x1b[0m`);
       process.exit(1);
     }
     const code = await runUnderJsonMode(
@@ -1116,9 +1333,48 @@ switch (subcommand) {
     // discoverability gap between `setup` and `scaffold --from-spec` —
     // new users don't know what a spec looks like. Optional positional
     // arg selects a single stack; no arg lists all five.
+    //
+    // v8.2.0 PR2: profile-resolution-OPTIONAL. Intentionally does NOT
+    // call `resolveActiveProfileOrExit()` — `examples` must work in a
+    // repo with a broken `.autopilot/profile` so users can pipe a
+    // starter spec into a file before they have a working profile.
+    //
+    // Use `subcommandIdx + 1` (not `args[1]`) so the stack positional
+    // resolves correctly when the user puts the global --profile flag
+    // BEFORE the `examples` keyword (bugbot MEDIUM, PR #220:
+    // `cadence --profile <name> examples node` previously read `<name>`
+    // as the stack and failed).
     const { runExamples } = await import('./examples.ts');
-    const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+    const next = args[subcommandIdx + 1];
+    const target = next && !next.startsWith('--') ? next : undefined;
     const code = runExamples(target);
+    process.exit(code);
+    break;
+  }
+
+  case 'profile': {
+    // v8.2.0 PR2 — `cadence profile <show|list>`.
+    //
+    // `profile show`: STRICT — resolves the active profile end-to-end
+    // (so the user sees the same error they'd hit in `autopilot` /
+    // `run` if the config were broken). Honors the global `--profile`
+    // flag and the `CLAUDE_AUTOPILOT_PROFILE` env var.
+    //
+    // `profile list`: profile-resolution-OPTIONAL — does NOT invoke
+    // the resolver. Enumerates the shipped profile stems directly so
+    // users can discover the valid names even with a broken
+    // `.autopilot/profile`.
+    //
+    // Use `subcommandIdx + 1` (not `args[1]`) so the sub-verb is
+    // located correctly when the user puts the global --profile flag
+    // BEFORE the `profile` keyword (e.g. `cadence --profile learning
+    // profile show`). With plain `args[1]` we'd misread the flag
+    // value as the sub-verb and reject `learning` as unknown.
+    const sub = args[subcommandIdx + 1];
+    const code = await runProfileCommand(sub ? [sub] : [], {
+      cwd: process.cwd(),
+      ...(globalProfileFlag !== undefined ? { flagProfile: globalProfileFlag } : {}),
+    });
     process.exit(code);
     break;
   }

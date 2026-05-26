@@ -82,6 +82,7 @@ export const HELP_GROUPS: HelpGroup[] = [
     verbs: [
       { verb: 'doctor', summary: 'Check prerequisites (alias: preflight)' },
       { verb: 'preflight', summary: 'Check prerequisites (alias: doctor)' },
+      { verb: 'profile', summary: 'Inspect user-type profile: profile {show,list} (v8.3.0+)' },
       { verb: 'council', summary: 'Multi-model review — dispatch the diff to N models and synthesize consensus' },
       { verb: 'test-gen', summary: 'Detect uncovered exports and generate test cases using the LLM' },
     ],
@@ -349,6 +350,24 @@ Options (run resume):
         would resume from and the decision rationale (retry, skip-idempotent,
         needs-human, already-complete) without actually executing the phase.
         Real execution wires in v6 Phase 6+.`,
+  profile: `Options (profile):
+
+Sub-verbs (profile):
+  profile show           Print the active profile + source + resolved YAML config
+  profile list           Print available profile names (one per line, alphabetical)
+
+  show: STRICT — resolves the active profile end-to-end and hard-fails on any
+        ProfileResolutionError. Honors the global --profile flag and the
+        CLAUDE_AUTOPILOT_PROFILE env var.
+  list: profile-resolution-OPTIONAL — does NOT invoke the resolver. Enumerates
+        the shipped profile stems directly so users can discover the valid
+        names even with a broken .autopilot/profile file.
+
+  Examples:
+    cadence profile list
+    cadence profile show
+    cadence profile show --profile enterprise
+    CLAUDE_AUTOPILOT_PROFILE=small-team cadence profile show`,
   deploy: `Options (deploy):
   --adapter <vercel|fly|render|generic>   Override deploy.adapter from config
   --config <path>              Path to config file
@@ -474,16 +493,36 @@ Resolution overrides (v7.8.0):
                          CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1. \`tsx\` will be
                          removed from runtime deps in v8.0.0.
 
-User-type profile (v8.2.0 PR1 ships schema + resolver only — flag NOT YET wired):
-  --profile <name>       [NOT YET ACTIVE in v8.2.0 PR1] Reserved for the v8.2.0
-                         PR2 CLI wiring. Once active, will override the resolved
-                         user-type profile (solo, small-team, oss-maintainer,
-                         enterprise, learning) with precedence
-                         .autopilot/profile < CLAUDE_AUTOPILOT_PROFILE env < flag.
-                         Default is solo (behavioral parity with v7.10.1).
-                         Until PR2 lands, passing this flag may fail as an
-                         unknown-argument CLI parser error. Set the profile via
-                         .autopilot/profile or CLAUDE_AUTOPILOT_PROFILE instead.`;
+User-type profile (v8.3.0 PR2 — validation + introspection wired; runtime enforcement lands in PR3):
+  --profile <name>       Select the active user-type profile. Shipped profiles:
+                         solo (default), small-team, oss-maintainer, enterprise,
+                         learning. Precedence (later layers win):
+                           default(solo) → .autopilot/profile → CLAUDE_AUTOPILOT_PROFILE → --profile
+                         PR2 scope: the flag is VALIDATED (hard-fail on
+                         unknown name / path traversal / schema violation)
+                         on every profile-resolution-required command
+                         (autopilot, run, validate, pr, doctor, profile show),
+                         and SURFACED in \`doctor\` + \`profile show\`. The
+                         resolved profile is NOT YET plumbed into codex_passes /
+                         pause_at_steps / audit_log_path behavior — PR3 ships
+                         that enforcement layer.
+                         Supports both \`--profile <name>\` and \`--profile=<name>\`.
+                         Multiple \`--profile\` occurrences are rejected.
+                         Empty values: --profile "" is a typed CLI error;
+                         CLAUDE_AUTOPILOT_PROFILE="" falls through to file/default.
+                         Path-traversal names (e.g. ../solo) are rejected before
+                         any file read. See \`cadence profile show\` and
+                         \`cadence profile list\`.
+  --strict-profile       [v8.3.0 reserved no-op] Accepted silently for forward
+                         compatibility. v8.3.0 ships hard profile errors that
+                         fail unconditionally; future point releases may use
+                         this flag to gate deprecation warnings as hard errors.
+
+Profile env:
+  CLAUDE_AUTOPILOT_PROFILE
+                         Single source of truth for the env layer. Empty /
+                         whitespace-only value is treated as unset (falls
+                         through to file → default).`;
 
 /** Build the full two-level help text. Returned as a string so tests can assert against it without spawning. */
 export function buildHelpText(): string {
