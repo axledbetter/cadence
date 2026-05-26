@@ -24,7 +24,7 @@
 >
 > The old npm package is deprecated but still installable; the GitHub repo at `axledbetter/claude-autopilot` redirects to `axledbetter/cadence`.
 
-**Autonomous development pipeline for Claude Code. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge — all from your terminal, on your codebase, with your test suite.**
+**The automated coding harness.** Multi-model role split (Claude writes, Codex reviews, Cursor bugbot triages). Risk-tiered review depth. Concurrent multi-PR dispatch. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge, from your terminal, on your codebase, with your test suite.
 
 **Open source, MIT-licensed, runs on your machine with your API keys.** No hosted agent, no per-seat subscription — `npm install -g @delegance/cadence@latest` and you're done.
 

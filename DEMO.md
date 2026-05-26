@@ -1,4 +1,4 @@
-# Cadence (formerly claude-autopilot) end-to-end demo
+# Cadence — the automated coding harness — end-to-end demo
 
 > **Brand note (v8.0.0):** This product was renamed from `@delegance/claude-autopilot` to `@delegance/cadence` in v8.0.0. All historical run captures below use the old CLI name (`claude-autopilot ...`). Those invocations still work as bin aliases through v8.x — but if you're reproducing them today, prefer `cadence ...`.
 >

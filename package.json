@@ -5,7 +5,7 @@
   "publishConfig": {
     "tag": "latest"
   },
-  "description": "Cadence — autonomous development pipeline for Claude Code: brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. Multi-model, local-first, every phase a skill you can intervene in. (Formerly @delegance/claude-autopilot.)",
+  "description": "Cadence: the automated coding harness for Claude Code. Multi-model role split (Claude writes, Codex reviews, bugbot triages), risk-tiered review depth, concurrent multi-PR dispatch, 16+ providers. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. MIT, local-first, every phase a rewireable Claude Code skill. (Formerly @delegance/claude-autopilot.)",
   "keywords": [
     "cadence",
     "claude-autopilot",
