@@ -493,13 +493,21 @@ Resolution overrides (v7.8.0):
                          CLAUDE_AUTOPILOT_NO_TSX_DEPRECATION=1. \`tsx\` will be
                          removed from runtime deps in v8.0.0.
 
-User-type profile (v8.3.0 — active in PR2):
-  --profile <name>       Active user-type profile. Overrides .autopilot/profile
-                         file + CLAUDE_AUTOPILOT_PROFILE env. Shipped profiles:
+User-type profile (v8.3.0 PR2 — validation + introspection wired; runtime enforcement lands in PR3):
+  --profile <name>       Select the active user-type profile. Shipped profiles:
                          solo (default), small-team, oss-maintainer, enterprise,
-                         learning. Precedence:
+                         learning. Precedence (later layers win):
                            default(solo) → .autopilot/profile → CLAUDE_AUTOPILOT_PROFILE → --profile
-                         (later layers win)
+                         PR2 scope: the flag is VALIDATED (hard-fail on
+                         unknown name / path traversal / schema violation)
+                         on every profile-resolution-required command
+                         (autopilot, run, validate, pr, doctor, profile show),
+                         and SURFACED in \`doctor\` + \`profile show\`. The
+                         resolved profile is NOT YET plumbed into codex_passes /
+                         pause_at_steps / audit_log_path behavior — PR3 ships
+                         that enforcement layer.
+                         Supports both \`--profile <name>\` and \`--profile=<name>\`.
+                         Multiple \`--profile\` occurrences are rejected.
                          Empty values: --profile "" is a typed CLI error;
                          CLAUDE_AUTOPILOT_PROFILE="" falls through to file/default.
                          Path-traversal names (e.g. ../solo) are rejected before

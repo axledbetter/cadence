@@ -171,6 +171,35 @@ describe('--profile flag precedence (CLI boundary)', () => {
     }
   });
 
+  it('--profile=<name> equals-form is honored equivalently to space-form (bug-bot pass 1 #3)', () => {
+    // Without the `=`-form support in getGlobalProfileFlag(), the
+    // flag would route the subcommand correctly (findSubcommandIndex
+    // already skipped --profile=val as a single token) but silently
+    // drop the value. Cover both forms here so the parity is locked.
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['--profile=learning', 'profile', 'show'], { cwd });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.match(r.stdout, /Profile:.*learning/);
+      assert.match(r.stdout, /Source:.*flag/);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('duplicate --profile occurrences are rejected (bug-bot pass 1 #5)', () => {
+    // "Last one wins" silently masks user mistakes — require a single
+    // source of truth. Mixing space-form + equals-form still counts.
+    const cwd = mkTempCwd();
+    try {
+      const r = runCli(['--profile', 'solo', '--profile=enterprise', 'profile', 'show'], { cwd });
+      assert.equal(r.code, 1, `expected exit 1; stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+      assert.match(r.stderr, /--profile specified .* times/i);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('--profile unknown rejected as unknown', () => {
     const cwd = mkTempCwd();
     try {

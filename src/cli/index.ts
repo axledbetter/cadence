@@ -288,30 +288,48 @@ aliases for the entire v8.x line. To migrate from the old npm package:
 // `runReview` and we don't need to special-case it inside the review path.
 //
 // v8.2.0 PR2 — the global `--profile <name>` flag may appear BEFORE the
-// subcommand (`cadence --profile small-team autopilot spec.md`). Walk
-// past any leading value-flag pairs so the first NON-flag token is the
-// subcommand. Without this hop the dispatcher would route `--profile X
-// autopilot` to the default `run` case and never reach `autopilot`.
+// subcommand (`cadence --profile small-team autopilot spec.md`). We walk
+// past leading occurrences of THIS specific global flag only — NOT every
+// `VALUE_FLAGS` entry. The narrower scope avoids changing dispatch for
+// invocations like `cadence --adapter vercel deploy` which were already
+// legal under the previous "default to run" heuristic and should keep
+// routing the way they did (a leading verb-local flag short-circuits to
+// the `run` case, which is intentional fallthrough behavior).
+//
+// Supports both `--profile <name>` and `--profile=<name>` shapes. The
+// `=`-form is a single token; the space-form consumes two.
+const GLOBAL_PRE_SUBCOMMAND_FLAGS = ['profile'] as const;
 function findSubcommandIndex(): number {
   let i = 0;
   while (i < args.length) {
     const tok = args[i];
     if (!tok || !tok.startsWith('--')) return i;
-    // `--key=val` is a single token — skip it.
-    if (tok.includes('=')) { i += 1; continue; }
-    // Bool flags don't consume a value; value flags do.
+    // `--key=val` is a single token — only skip if it's a known
+    // pre-subcommand global flag.
+    if (tok.includes('=')) {
+      const name = tok.slice(2, tok.indexOf('='));
+      if ((GLOBAL_PRE_SUBCOMMAND_FLAGS as readonly string[]).includes(name)) {
+        i += 1;
+        continue;
+      }
+      // Not a global flag — stop hopping; the existing
+      // "default to run" branch handles it (preserved behavior).
+      return i;
+    }
     const name = tok.slice(2);
-    if (VALUE_FLAGS.includes(name)) {
+    if ((GLOBAL_PRE_SUBCOMMAND_FLAGS as readonly string[]).includes(name)) {
       // Skip the flag AND its value. If the value is missing or is
-      // itself a flag, the dedicated verb-local `flag()` parser will
-      // surface a clearer error later — we just don't want to count
-      // the next token as the subcommand here.
+      // itself a flag, the dedicated `getGlobalProfileFlag()` surfaces
+      // a typed error later — we just don't want to count the next
+      // token as the subcommand here.
       const next = args[i + 1];
       if (next !== undefined && !next.startsWith('--')) { i += 2; continue; }
       i += 1;
       continue;
     }
-    i += 1;
+    // Non-global flag at the head — preserve the legacy
+    // "default to run" behavior by stopping the scan.
+    return i;
   }
   return args.length;
 }
@@ -361,24 +379,48 @@ function boolFlag(name: string): boolean {
  * not fire for the setup path.
  */
 function getGlobalProfileFlag(): string | undefined {
-  // Use `args.indexOf` directly (not `flag(name)`) because `flag()`
-  // hard-exits when the value is missing/another-flag. We want the
-  // resolver to surface the empty-value error with a typed
-  // ProfileResolutionError + remediation hint, not a generic stderr
-  // exit-1.
-  const idx = args.indexOf('--profile');
-  if (idx < 0) return undefined;
-  const val = args[idx + 1];
-  if (val === undefined) {
-    // `--profile` at end of argv with no value — same outcome shape
-    // as `flag()`, but routed through the resolver so the message is
-    // consistent across all the profile-resolution-required paths.
-    return '';
+  // Scan argv ONCE so we can:
+  //  - collect every `--profile <name>` and `--profile=<name>`
+  //    occurrence (both shapes — bug-bot pass 1 #3 flagged the
+  //    `=`-form silently dropping the value),
+  //  - hard-fail on duplicate occurrences (bug-bot pass 1 #5 —
+  //    "last one wins" silently masks user mistakes; require an
+  //    explicit single source of truth),
+  //  - return the empty string for a missing value so the
+  //    resolver surfaces the typed parse_error + remediation
+  //    hint (instead of a generic stderr exit-1 from `flag()`).
+  const occurrences: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const tok = args[i];
+    if (tok === undefined) continue;
+    if (tok === '--profile') {
+      const val = args[i + 1];
+      if (val === undefined || val.startsWith('--')) {
+        occurrences.push('');
+        // Don't increment i — the next token is another flag, not
+        // a consumed value.
+      } else {
+        occurrences.push(val);
+        i += 1;
+      }
+      continue;
+    }
+    if (tok.startsWith('--profile=')) {
+      occurrences.push(tok.slice('--profile='.length));
+      continue;
+    }
   }
-  // `--profile --json` shape (next token starts with `--`) — treat as
-  // missing value, let the resolver typed-error fire.
-  if (val.startsWith('--')) return '';
-  return val;
+  if (occurrences.length === 0) return undefined;
+  if (occurrences.length > 1) {
+    process.stderr.write(
+      `\x1b[31m[cadence] --profile specified ${occurrences.length} times — only one value is allowed.\x1b[0m\n`,
+    );
+    process.stderr.write(
+      `\x1b[2m  values: ${occurrences.map(v => v === '' ? '<empty>' : v).join(', ')}\x1b[0m\n`,
+    );
+    process.exit(1);
+  }
+  return occurrences[0];
 }
 
 /**
