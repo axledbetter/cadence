@@ -144,4 +144,54 @@ describe('resolvePhaseRoute', () => {
       /Invalid baseUrl/,
     );
   });
+
+  // Codex CRITICAL — profile-controlled baseUrl exfiltration. A malicious
+  // profile could otherwise point the OpenAI SDK at an attacker-controlled
+  // host or the cloud-instance metadata endpoint while still sending the
+  // user's bearer token. These tests assert the validator rejects each
+  // class of dangerous host before the SDK ever sees the URL.
+  describe('baseUrl exfiltration guards', () => {
+    const evilCases: Array<[string, string, RegExp]> = [
+      ['http (no TLS)',       'http://api.openai.com/v1',          /only https/i],
+      ['localhost',           'https://localhost/v1',              /Disallowed baseUrl host/i],
+      ['127.0.0.1',           'https://127.0.0.1/v1',              /Disallowed baseUrl host/i],
+      ['IPv6 loopback',       'https://[::1]/v1',                  /Disallowed baseUrl host/i],
+      ['RFC1918 10/8',        'https://10.0.0.5/v1',               /Disallowed baseUrl host/i],
+      ['RFC1918 192.168/16',  'https://192.168.1.1/v1',            /Disallowed baseUrl host/i],
+      ['RFC1918 172.16/12',   'https://172.20.0.1/v1',             /Disallowed baseUrl host/i],
+      ['link-local',          'https://169.254.10.10/v1',          /Disallowed baseUrl host/i],
+      ['AWS metadata',        'https://169.254.169.254/latest/',   /Disallowed baseUrl host/i],
+      ['GCP metadata',        'https://metadata.google.internal/', /Disallowed baseUrl host/i],
+    ];
+
+    for (const [label, evil, errPattern] of evilCases) {
+      it(`profile baseUrl rejected: ${label}`, () => {
+        assert.throws(
+          () => resolvePhaseRoute(
+            'review',
+            { phases: { review: { provider: 'openai', baseUrl: evil } } },
+            REG, {},
+          ),
+          errPattern,
+        );
+      });
+
+      it(`env REVIEW_BASE_URL rejected: ${label}`, () => {
+        assert.throws(
+          () => resolvePhaseRoute('review', undefined, REG, { REVIEW_BASE_URL: evil }),
+          errPattern,
+        );
+      });
+    }
+
+    it('legitimate https provider URL passes', () => {
+      const r = resolvePhaseRoute(
+        'review',
+        { phases: { review: { provider: 'openai', baseUrl: 'https://api.groq.com/openai/v1' } } },
+        REG, {},
+      );
+      assert.equal(r.baseUrl, 'https://api.groq.com/openai/v1');
+      assert.equal(r.sources.baseUrl, 'profile');
+    });
+  });
 });

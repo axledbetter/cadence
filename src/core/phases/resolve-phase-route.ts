@@ -73,17 +73,47 @@ export interface ProfileWithPhases {
   phases?: Partial<Record<PhaseName, PhaseRoute>>;
 }
 
+// Block IP literals/hostnames that could let a malicious profile point the
+// SDK at an attacker-controlled or metadata-service endpoint while still
+// sending the API key (codex CRITICAL — profile-controlled baseUrl
+// exfiltration). Loopback, link-local, RFC1918, AWS/GCP metadata.
+const BLOCKED_HOSTS = new Set([
+  'localhost', '127.0.0.1', '0.0.0.0', '::1',
+  '169.254.169.254',  // AWS/GCP/Azure metadata
+  'metadata.google.internal',
+]);
+const PRIVATE_IP_RE = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fc|fd|fe80:)/i;
+
 function validateBaseUrl(raw: string, source: 'profile' | 'env'): string {
-  // Profile baseUrls are validated by JSON Schema (format: uri), but env
-  // values are not — validate both here so a bogus REVIEW_BASE_URL fails
-  // loudly at resolve time rather than silently flowing to the SDK.
+  let url: URL;
   try {
-    // eslint-disable-next-line no-new
-    new URL(raw);
+    url = new URL(raw);
   } catch {
     throw new GuardrailError(
       `Invalid baseUrl from ${source}: "${raw}"`,
       { code: 'invalid_config', details: { source, value: raw } },
+    );
+  }
+  // Require https. http would let a MITM swap the target or read API keys
+  // in plaintext. The single legitimate exception (local mock servers in
+  // tests) is handled by passing baseUrl directly to the adapter in test
+  // code, not by config resolution.
+  if (url.protocol !== 'https:') {
+    throw new GuardrailError(
+      `Insecure baseUrl from ${source}: "${raw}" — only https:// is allowed for provider endpoints`,
+      { code: 'invalid_config', details: { source, value: raw, protocol: url.protocol } },
+    );
+  }
+  // Reject hosts that would expose cloud-instance metadata or loop back to
+  // the local machine — a profile-supplied baseUrl pointing at
+  // 169.254.169.254 with the OpenAI SDK would happily POST the bearer
+  // token there. URL.hostname keeps IPv6 literals bracketed (`[::1]`), so
+  // normalize before lookup.
+  const host = url.hostname.toLowerCase().replace(/^\[(.+)\]$/, '$1');
+  if (BLOCKED_HOSTS.has(host) || PRIVATE_IP_RE.test(host)) {
+    throw new GuardrailError(
+      `Disallowed baseUrl host from ${source}: "${host}" — private, loopback, link-local, and cloud-metadata addresses are blocked`,
+      { code: 'invalid_config', details: { source, value: raw, host } },
     );
   }
   return raw;
