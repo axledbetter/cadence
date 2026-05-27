@@ -6,15 +6,23 @@ import { buildSystemPrompt, classifyError } from './prompt-builder.ts';
 import { loadOpenAI } from '../sdk-loader.ts';
 import { getModelPricing } from '../pricing.ts';
 
-const DEFAULT_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.5';
+// FALLBACK_MODEL is the historical hard-coded default. The dispatcher
+// (`src/core/phases/dispatch.ts`) now passes the resolved model via
+// `input.context.model`; this constant is only used when the adapter is
+// invoked directly (e.g. legacy call sites that bypass routing). The
+// legacy `CODEX_MODEL` env var is still honored as a second-level
+// fallback for back-compat with v8.4.x users.
+const FALLBACK_MODEL = 'gpt-5.5';
 const MAX_OUTPUT_TOKENS = 4096;
 
 // Per-million-token rates. Bugbot LOW PR #93: wired to read from the
 // canonical MODEL_PRICING table so the table is no longer dead code.
-// Resolution order: env override → MODEL_PRICING entry for DEFAULT_MODEL →
+// Resolution order: env override → MODEL_PRICING entry for FALLBACK_MODEL →
 // numeric fallback (gpt-5.5 published rates). Costs are computed client-side
 // because the OpenAI Responses API returns token counts but no $-cost field.
-const _pricing = getModelPricing(DEFAULT_MODEL);
+// TODO(v8.6.0): re-resolve pricing per-request using the actually-routed
+// model so cost numbers stay accurate when phases pin different models.
+const _pricing = getModelPricing(FALLBACK_MODEL);
 const COST_PER_M_INPUT = Number(process.env.CODEX_COST_INPUT_PER_M ?? _pricing?.inputPer1M ?? 5.0);
 const COST_PER_M_OUTPUT = Number(process.env.CODEX_COST_OUTPUT_PER_M ?? _pricing?.outputPer1M ?? 30.0);
 
@@ -55,18 +63,24 @@ export const codexAdapter: ReviewEngine = {
   },
 
   async review(input: ReviewInput): Promise<ReviewOutput> {
-    const apiKey = process.env.OPENAI_API_KEY;
+    const ctx = input.context as Record<string, unknown> | undefined;
+    const apiKeyEnv = (ctx?.['apiKeyEnv'] as string | undefined) ?? 'OPENAI_API_KEY';
+    const apiKey = process.env[apiKeyEnv];
     if (!apiKey) {
-      throw new GuardrailError('OPENAI_API_KEY not set', { code: 'auth', provider: 'codex' });
+      throw new GuardrailError(`${apiKeyEnv} not set`, { code: 'auth', provider: 'codex' });
     }
+    const model = (ctx?.['model'] as string | undefined)
+      ?? process.env.CODEX_MODEL
+      ?? FALLBACK_MODEL;
+    const baseURL = ctx?.['baseUrl'] as string | undefined;
     const systemPrompt = buildSystemPrompt(input, SYSTEM_PROMPT_TEMPLATE);
 
     const OpenAI = await loadOpenAI();
-    const client = new OpenAI({ apiKey });
+    const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     let response;
     try {
       response = await client.responses.create({
-        model: DEFAULT_MODEL,
+        model,
         instructions: systemPrompt,
         input: `Please review the following:\n\n---\n\n${input.content}`,
         max_output_tokens: MAX_OUTPUT_TOKENS,

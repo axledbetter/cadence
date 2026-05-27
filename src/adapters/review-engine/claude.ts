@@ -6,7 +6,12 @@ import { parseReviewOutput } from './parse-output.ts';
 import { buildSystemPrompt, classifyError } from './prompt-builder.ts';
 import { loadAnthropic } from '../sdk-loader.ts';
 
-const DEFAULT_MODEL = 'claude-opus-4-7';
+// FALLBACK_MODEL is the historical hard-coded default. The dispatcher
+// (`src/core/phases/dispatch.ts`) now passes the resolved model via
+// `input.context.model`; this constant is only used when the adapter is
+// invoked directly (e.g. legacy call sites that bypass routing).
+// TODO(v8.6.0): re-resolve pricing per-request using the routed model.
+const FALLBACK_MODEL = 'claude-opus-4-7';
 const MAX_OUTPUT_TOKENS = 4096;
 
 // Cost per million tokens (USD) — opus-4-7 pricing
@@ -51,12 +56,14 @@ export const claudeAdapter: ReviewEngine = {
   },
 
   async review(input: ReviewInput): Promise<ReviewOutput> {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const ctx = input.context as Record<string, unknown> | undefined;
+    const apiKeyEnv = (ctx?.['apiKeyEnv'] as string | undefined) ?? 'ANTHROPIC_API_KEY';
+    const apiKey = process.env[apiKeyEnv];
     if (!apiKey) {
-      throw new GuardrailError('ANTHROPIC_API_KEY not set', { code: 'auth', provider: 'claude' });
+      throw new GuardrailError(`${apiKeyEnv} not set`, { code: 'auth', provider: 'claude' });
     }
 
-    const model = (input.context as Record<string, unknown> | undefined)?.['model'] as string | undefined ?? DEFAULT_MODEL;
+    const model = (ctx?.['model'] as string | undefined) ?? FALLBACK_MODEL;
     const systemPrompt = buildSystemPrompt(input, SYSTEM_PROMPT_TEMPLATE);
 
     const Anthropic = await loadAnthropic();

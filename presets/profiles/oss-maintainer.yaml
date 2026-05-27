@@ -19,3 +19,14 @@ pr_template_path: presets/profiles/templates/oss-maintainer-pr-template.md
 contributor_policy:
   external_high_codex_passes: 3
   membership_provider: github-org
+
+# Optional: per-phase provider routing override (v8.5.0+).
+# Uncomment to pin a phase to a specific provider + model. Precedence:
+# profile > env var > adapter default. The `implement` phase is intentionally
+# absent — Claude Code's session model is not overridable from outside.
+# Run `cadence routes` to inspect the resolved routes with source attribution.
+#
+# phases:
+#   review:        { provider: openai,    model: gpt-5.5 }
+#   council:       { provider: google,    model: gemini-2.5-pro-preview-05-06 }
+#   bugbot_triage: { provider: anthropic, model: claude-haiku-4-5 }

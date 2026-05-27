@@ -309,6 +309,36 @@ chunking:
 | `team` | Core security + hygiene | `critical` | Standard CI/CD on shared branches |
 | `solo` | Hygiene only | `critical` | Solo projects, low-noise baseline |
 
+### Per-Phase Provider Routing (v8.5.0+)
+
+Pin a specific provider + model for each phase of the pipeline. Add a `phases:` block to your profile YAML:
+
+```yaml
+# presets/profiles/<your-profile>.yaml
+phases:
+  review:        { provider: openai,    model: gpt-5.5 }
+  council:       { provider: google,    model: gemini-2.5-pro-preview-05-06 }
+  bugbot_triage: { provider: anthropic, model: claude-haiku-4-5 }
+```
+
+Routed phases: `review`, `council`, `bugbot_triage`. The `implement` phase is intentionally absent — Claude Code's session model is not overridable from outside.
+
+Precedence (highest wins): `profile.phases.<phase>` > env var (`REVIEW_PROVIDER`, `REVIEW_MODEL`, `REVIEW_BASE_URL`, etc.) > legacy env (`CODEX_MODEL`, `BUGBOT_MODEL`) > adapter default. Per-field — you can pin `provider` in the profile and still let `REVIEW_MODEL` win for the model.
+
+Inspect the resolved routes with source attribution:
+
+```bash
+$ cadence routes
+Profile: solo (source: default)
+
+implement       runtime-bound (Claude Code session model)
+review          openai / gpt-5.5 @ https://api.openai.com/v1   (provider: default, model: default, baseUrl: default)
+council         google / gemini-2.5-pro-preview-05-06   (provider: default, model: default)
+bugbot_triage   anthropic / claude-haiku-4-5   (provider: default, model: default)
+```
+
+Providers exposed via this schema today: `anthropic, openai, google, bedrock, azure, cohere, mistral, openai-compatible`. The OpenAI-compatible bucket covers Groq, Ollama, DeepSeek, Together, Fireworks, Perplexity, OpenRouter, and xAI — pin `provider: openai-compatible` and add an explicit `baseUrl`.
+
 ### Review Engine Adapters
 
 | Adapter | Key required | Notes |

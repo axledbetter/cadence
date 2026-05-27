@@ -36,6 +36,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as yaml from 'js-yaml';
 import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 import { findPackageRoot } from '../../cli/_pkg-root.ts';
 import {
   ProfileResolutionError,
@@ -83,6 +84,10 @@ function getValidator(packageRoot: string): ReturnType<Ajv['compile']> {
     );
   }
   const ajv = new Ajv({ allErrors: true, strict: false });
+  // v8.5.0 — `phaseRoute.baseUrl` uses `format: "uri"`; register
+  // ajv-formats so the validator recognizes it instead of warning
+  // "unknown format 'uri' ignored".
+  addFormats(ajv);
   const compiled = ajv.compile(schemaJson as object);
   _validatorCache.set(packageRoot, compiled);
   return compiled;

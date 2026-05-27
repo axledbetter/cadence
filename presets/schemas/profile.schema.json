@@ -101,6 +101,36 @@
           "description": "Which membership provider to query. Only `github-org` is supported in v8.2.0; reserved enum for future providers (e.g. `gitlab-group`)."
         }
       }
+    },
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-phase provider routing override (v8.5.0+). Each routed phase (review, council, bugbot_triage) can pin its own provider + model + baseUrl. Precedence: profile > env > adapter default. The `implement` phase is intentionally absent — Claude Code's session model is not overridable from outside.",
+      "properties": {
+        "review":        { "$ref": "#/$defs/phaseRoute" },
+        "council":       { "$ref": "#/$defs/phaseRoute" },
+        "bugbot_triage": { "$ref": "#/$defs/phaseRoute" }
+      }
+    }
+  },
+  "$defs": {
+    "phaseRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "description": "Override block for a single phase. `provider` is required so the route is never ambiguous; `model` and `baseUrl` fall back to provider-specific defaults from the registry.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "anthropic", "openai", "google", "bedrock",
+            "azure", "cohere", "mistral", "openai-compatible"
+          ],
+          "description": "Provider identifier — must match a built-in review-engine adapter. Providers like Groq, Ollama, DeepSeek, Together, Fireworks, Perplexity, OpenRouter, and xAI are reachable via `openai-compatible` + an explicit `baseUrl`."
+        },
+        "model":   { "type": "string", "minLength": 1, "description": "Model identifier passed verbatim to the provider's API. When omitted, the provider's default for this phase is used (see PROVIDER_REGISTRY)." },
+        "baseUrl": { "type": "string", "format": "uri", "description": "Optional API endpoint override. Ignored (with a warning) for providers whose SDK does not support a custom base URL (e.g. anthropic, google, bedrock, cohere)." }
+      }
     }
   }
 }
