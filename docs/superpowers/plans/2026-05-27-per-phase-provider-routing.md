@@ -4,23 +4,42 @@ date: 2026-05-27
 spec: docs/superpowers/specs/2026-05-27-per-phase-provider-routing-design.md
 risk_tier: medium
 status: ready-to-implement
+codex_review_applied: 2026-05-27
 ---
 
 # Per-Phase Provider Routing — Implementation Plan
 
 Bite-sized TDD plan. Each step has a writeable test, a writeable implementation, and a verifiable green run. The dispatcher pattern (resolve → switch on `provider` → call already-resolved adapter) is the load-bearing decision and gets implemented before any adapter refactor so the existing call sites stay green throughout.
 
+## Codex CRITICAL findings applied (plan v2)
+
+Codex review of plan v1 raised two CRITICAL issues. Both are resolved in this revision:
+
+1. **OpenAI-compatible providers were under-specified** — the dispatcher only forwarded `model` + `baseUrl`, but Groq/Ollama/DeepSeek/etc. also need provider-specific `apiKeyEnv` and `defaultBaseUrl`. Resolution: the `ProviderCapability` now carries `defaultBaseUrl` and `apiKeyEnv`; the resolver fills in the provider's `defaultBaseUrl` when no explicit `baseUrl` is set; `withRoute()` forwards `provider`, `model`, `baseUrl`, AND `apiKeyEnv` via `input.context`. The `openai-compatible.ts` adapter already reads `apiKeyEnv` from context (see `src/adapters/review-engine/auto.ts` `buildGroqAdapter` pattern).
+
+2. **Schema/registry/dispatcher drift risk** — exposing all 16 providers in the schema risks routes that resolve but fail at invocation. Resolution: ship the schema enum with only the **8 providers that currently have working adapters** in `src/adapters/review-engine/`: `openai, anthropic, google, bedrock, azure, cohere, mistral, openai-compatible`. The OpenAI-compatible bucket covers Groq/Ollama/DeepSeek/Together/Fireworks/Perplexity/OpenRouter/xAI via explicit `baseUrl` + `apiKeyEnv`. A dedicated test (`schema-registry-dispatch-parity.test.ts`) asserts schema enum ≡ registry keys ≡ dispatcher switch cases — catches drift at CI time.
+
+WARNING/NOTE findings applied:
+- Resolver no longer throws on `cap.installed === false` — installation is now a runtime check at dispatch time (`assertProviderInstalled`), not a resolve-time check. `cadence routes` can list a provider as `(not installed)` without failing.
+- Per-field precedence is intentional and documented; resolver test #6 covers profile-provider + env-model mix.
+- Unsupported-provider errors carry the phase name correctly via `loadReviewAdapter(provider, phase)`.
+- Env `${PHASE}_BASE_URL` is validated as a URL; a baseUrl allowlist is captured as a follow-up (codex deferred).
+- `ProfileConfig.phases` is typed with `PhaseName` + a provider literal union (not loose `Record<string, …>`).
+- Dispatcher tests now assert that `input.context.model`, `input.context.baseUrl`, `input.context.provider` are propagated; the fake adapter exposes a `getState()` accessor.
+- Pricing is left as fallback in adapters; a follow-up will route pricing through the resolver. Marked TODO in the adapter.
+
 ## Order of operations
 
-1. **Schema first** — add `phases` + `phaseRoute` to `presets/schemas/profile.schema.json`. No code consumes it yet; this is just the contract.
-2. **Profile type** — extend `src/core/profile/types.ts` with optional `phases?` field. Resolver doesn't need to change (`additionalProperties: false` already validates).
-3. **Provider registry** — `src/core/phases/provider-registry.ts` lists 16 providers with default models per phase + installed check.
-4. **Resolver** — `src/core/phases/resolve-phase-route.ts` with per-field source attribution. Pure function. 7 unit tests.
-5. **Dispatcher** — `src/core/phases/dispatch.ts` exports `invokeReview / invokeCouncil / invokeBugbotTriage`. Each switches on `route.provider`. 4 unit tests, mocking adapters at the module-loader boundary.
+1. **Schema first** — add `phases` + `phaseRoute` to `presets/schemas/profile.schema.json`. Enum: 8 providers with working adapters today (`openai, anthropic, google, bedrock, azure, cohere, mistral, openai-compatible`).
+2. **Profile type** — extend `src/core/profile/types.ts` with typed `phases?: Partial<Record<PhaseName, PhaseRoute>>` field.
+3. **Provider registry** — `src/core/phases/provider-registry.ts`: 8 providers with `defaultModelByPhase`, `defaultBaseUrl`, `apiKeyEnv`, `supportsBaseUrl`, `installed`.
+4. **Resolver** — `src/core/phases/resolve-phase-route.ts` with per-field source attribution. Pure function. 7 unit tests. Does NOT check `installed`.
+5. **Dispatcher** — `src/core/phases/dispatch.ts` exports `invokeReview / invokeCouncil / invokeBugbotTriage`. Each switches on `route.provider`. Asserts `installed` at invocation time. Propagates provider/model/baseUrl/apiKeyEnv via `input.context`. 4+ unit tests (incl. context-propagation assertions and per-phase UnsupportedProviderError).
 6. **Adapter refactor** — `codex.ts`, `claude.ts`, `gemini.ts` no longer own `DEFAULT_MODEL`. They accept `{ model, baseUrl }` via existing `input.context` path (which gemini and claude already read). Codex gets the same treatment.
-7. **CLI verb** — `cadence routes` (new `src/cli/routes.ts`, wired into `src/cli/index.ts` switch). One smoke test using the same `spawnSync` pattern as `tests/cli/profile.test.ts`.
-8. **Profile YAML** — `oss-maintainer.yaml` and `enterprise.yaml` get a **commented-out** example `phases:` block.
-9. **README** — append a "Provider routing" section.
+7. **Parity test** — `tests/phases/schema-registry-dispatch-parity.test.ts` asserts schema enum ≡ registry keys ≡ dispatcher cases.
+8. **CLI verb** — `cadence routes` (new `src/cli/routes.ts`, wired into `src/cli/index.ts` switch). One smoke test using the same `spawnSync` pattern as `tests/cli/profile.test.ts`.
+9. **Profile YAML** — `oss-maintainer.yaml` and `enterprise.yaml` get a **commented-out** example `phases:` block.
+10. **README** — append a "Provider routing" section.
 
 Existing tests (`config-schema`, `council/config`, `claude-adapter`, `codex` if present, `gemini`) must stay green. Step 6 is the only step that could break existing tests — if so, fix the test by passing a `context.model` instead of relying on the removed default constant.
 
@@ -54,9 +73,8 @@ Patch (conceptual):
         "provider": {
           "type": "string",
           "enum": [
-            "anthropic","openai","google","groq","ollama","bedrock",
-            "azure","cohere","mistral","deepseek","together","fireworks",
-            "perplexity","openrouter","xai","openai-compatible"
+            "anthropic","openai","google","bedrock",
+            "azure","cohere","mistral","openai-compatible"
           ]
         },
         "model":   { "type": "string", "minLength": 1 },
