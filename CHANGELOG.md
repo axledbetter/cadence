@@ -1,4 +1,52 @@
-## Unreleased — v8.4.0 target
+## v8.5.0 — 2026-05-27
+
+### Added
+
+- **Per-phase provider routing in profile YAML (PR #229).** New `phases:`
+  block in `profile.yaml` lets users route each SDLC role to a different
+  provider+model. Schema covers `review`, `council`, and `bugbot_triage`
+  across 8 first-party adapters (`anthropic`, `openai`, `google`,
+  `bedrock`, `azure`, `cohere`, `mistral`, `openai-compatible`); the
+  `implement` phase remains runtime-bound to the Claude Code session
+  model. Resolution order is profile → env (`<PHASE>_PROVIDER` /
+  `<PHASE>_MODEL` / `<PHASE>_BASE_URL`) → legacy env (`CODEX_MODEL`,
+  `BUGBOT_MODEL`) → registry default, with per-field source attribution
+  (`sources.{provider,model,baseUrl}`). New `cadence routes` CLI verb
+  prints the resolved route per phase with source attribution. Phase
+  dispatcher (`src/core/phases/dispatch.ts`) selects the adapter based
+  on `route.provider`, replacing the prior assumption that the review
+  engine always called the Codex adapter. Spec at
+  `docs/superpowers/specs/2026-05-27-per-phase-provider-routing-design.md`.
+- **Autopilot checkpoint/resume — v6 run-state engine wired in (PR
+  #230, closes #180).** Autopilot now writes a typed `state.json` +
+  append-only `events.ndjson` per run, with phase boundaries as
+  durable barriers (`fsync` artifact sidecar → atomic event append →
+  state.json refresh). `cadence autopilot resume <ulid>` is an
+  inspection verb that loads the run, runs evidence verification
+  (commit SHAs, migration checksums, PR head ref, comment IDs),
+  classifies as `resumable`/`needs-human`/`refused`, and releases the
+  lock via `try/finally`. Behind feature flag `CADENCE_RUN_STATE_ENABLED`
+  (default OFF in v8.5.0; will flip ON in v8.5.x after a week of
+  dogfooding). Spec at
+  `docs/superpowers/specs/2026-05-27-autopilot-run-state-integration-design.md`.
+
+### Security
+
+- **Profile-controlled `baseUrl` exfiltration blocked.** Codex 5.3 flagged
+  that the routing schema allowed arbitrary `baseUrl` (only `format: uri`),
+  which would let a malicious or compromised profile point the OpenAI SDK
+  at an attacker host or `169.254.169.254` while still sending the API key.
+  `resolvePhaseRoute()` now rejects non-https schemes, loopback, RFC1918,
+  link-local, IPv6 fc/fd/fe80, and AWS/GCP/Azure metadata endpoints. Same
+  validator runs for env-supplied URLs.
+
+### Notes
+
+- v8.5.0 is **additive only** — no breaking changes to existing profile
+  YAML, CLI verbs, or skill contracts. Profiles without a `phases:` block
+  behave identically to v8.4.0.
+
+## v8.4.0 — 2026-05-26
 
 ### Added
 
