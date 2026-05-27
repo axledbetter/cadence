@@ -1117,6 +1117,22 @@ switch (subcommand) {
   }
 
   case 'autopilot': {
+    // v8.5.0 — `cadence autopilot resume <ulid>` inspection sub-verb.
+    // Loads the run via AutopilotRun.resume(), runs evidence verification,
+    // prints what the skill harness would do next. Phase execution is the
+    // skill's responsibility — this verb is inspection-only.
+    const apSub = args[subcommandIdx + 1];
+    if (apSub === 'resume') {
+      const ulid = args[subcommandIdx + 2];
+      if (!ulid || ulid.startsWith('--')) {
+        process.stderr.write('\x1b[31m[autopilot] resume requires a run ID\x1b[0m\n');
+        process.exit(1);
+      }
+      const { runAutopilotResume } = await import('./autopilot-resume.ts');
+      const resumeResult = await runAutopilotResume({ cwd: process.cwd(), runId: ulid });
+      process.exit(resumeResult.exitCode);
+    }
+
     // v8.2.0 PR2 — profile-resolution-required (STRICT). Early-error
     // gate; the resolved profile isn't plumbed into runAutopilot yet
     // (PR3 wires it into the skill content).

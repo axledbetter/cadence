@@ -490,6 +490,32 @@ Persistence is in-memory only in v7.10.0. The v6 run-state events.ndjson integra
 
 ## Error Recovery
 
+If a run halts mid-flight (machine sleep, kill, network drop):
+
+```
+$ cadence runs list                  # find the ulid
+$ cadence autopilot resume <ulid>    # inspect the last completed phase + resume decision
+```
+
+The engine refuses to resume if the worktree, git, or migration state
+diverges from the recorded phase-output evidence (commit SHAs, migration
+checksums, PR head ref, etc.). In that case the run is marked
+needs-human and the operator fixes manually:
+
+```
+$ cadence runs show <ulid>           # see what evidence diverged
+```
+
+Per-run state lives at `.guardrail-cache/runs/<ulid>/`. Set
+`CADENCE_RUN_STATE_ENABLED=true` to opt into checkpointing (default OFF
+in v8.5.0; flips to ON in a follow-up release after dogfooding).
+
+The authoritative phase boundary lives in
+`src/core/autopilot/run-lifecycle.ts` — this section describes recovery
+UX only. The skill never relies on textual log markers for correctness.
+
+### Other failures
+
 - **Preflight failure:** Surface the specific check, exit. Do not partially run.
 - **Missing skill/credential:** Exit with install/auth hint.
 - **Subagent failure:** Re-dispatch with more context or implement directly.
