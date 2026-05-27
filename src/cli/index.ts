@@ -1685,6 +1685,20 @@ switch (subcommand) {
     break;
   }
 
+  case 'routes': {
+    // v8.5.0 — `cadence routes` prints the resolved provider+model+baseUrl
+    // for each routed phase (review, council, bugbot_triage) with per-field
+    // source attribution. Read-only diagnostic, mirrors `profile show`'s
+    // resolution semantics.
+    const { runRoutesCommand } = await import('./routes.ts');
+    const code = await runRoutesCommand({
+      cwd: process.cwd(),
+      ...(globalProfileFlag !== undefined ? { flagProfile: globalProfileFlag } : {}),
+    });
+    process.exit(code);
+    break;
+  }
+
   case 'runs': {
     // v6 Phase 3 — umbrella verb. Sub-verbs: list, show, gc, delete, doctor.
     const sub = args[1];

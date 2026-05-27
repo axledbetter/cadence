@@ -27,6 +27,20 @@ export interface ContributorPolicy {
   membership_provider: 'github-org';
 }
 
+/** Phase identifiers eligible for per-phase provider routing. */
+export type PhaseName = 'review' | 'council' | 'bugbot_triage';
+
+/** Providers exposed in the profile schema enum (v8.5.0+). */
+export type PhaseProvider =
+  | 'anthropic' | 'openai' | 'google' | 'bedrock'
+  | 'azure' | 'cohere' | 'mistral' | 'openai-compatible';
+
+export interface PhaseRoute {
+  provider: PhaseProvider;
+  model?: string;
+  baseUrl?: string;
+}
+
 export interface ProfileConfig {
   profile: string;
   description: string;
@@ -38,6 +52,12 @@ export interface ProfileConfig {
   codex_explanations: boolean;
   pr_template_path: string | null;
   contributor_policy: ContributorPolicy | null;
+  /**
+   * Per-phase provider routing override (v8.5.0+).
+   * Absent on profiles that don't pin providers — the resolver falls
+   * through to env vars + adapter defaults.
+   */
+  phases?: Partial<Record<PhaseName, PhaseRoute>>;
 }
 
 export type ProfileResolutionSource = 'default' | 'file' | 'env' | 'flag';

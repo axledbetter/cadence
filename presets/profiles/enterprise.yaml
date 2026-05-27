@@ -17,3 +17,16 @@ audit_log_path: .claude/audit/
 codex_explanations: false
 pr_template_path: presets/profiles/templates/enterprise-pr-template.md
 contributor_policy: null
+
+# Optional: per-phase provider routing override (v8.5.0+).
+# Uncomment to pin a phase to a specific provider + model. Enterprise
+# deployments often want different providers for different phases (e.g.
+# review on a self-hosted model, council on a frontier model). The
+# `implement` phase is intentionally absent — Claude Code's session model
+# is not overridable from outside. Run `cadence routes` to inspect the
+# resolved routes with source attribution.
+#
+# phases:
+#   review:        { provider: bedrock,  model: anthropic.claude-sonnet-4-5-20250929-v1:0 }
+#   council:       { provider: openai,   model: gpt-5.5 }
+#   bugbot_triage: { provider: bedrock,  model: anthropic.claude-haiku-4-5-20251001-v1:0 }

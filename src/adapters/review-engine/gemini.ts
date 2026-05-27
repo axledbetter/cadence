@@ -5,7 +5,12 @@ import type { ReviewEngine, ReviewInput, ReviewOutput } from './types.ts';
 import { buildSystemPrompt, classifyError } from './prompt-builder.ts';
 import { loadGoogleGenerativeAI } from '../sdk-loader.ts';
 
-const DEFAULT_MODEL = 'gemini-2.5-pro-preview-05-06';
+// FALLBACK_MODEL is the historical hard-coded default. The dispatcher
+// (`src/core/phases/dispatch.ts`) now passes the resolved model via
+// `input.context.model`; this constant is only used when the adapter is
+// invoked directly (e.g. legacy call sites that bypass routing).
+// TODO(v8.6.0): re-resolve pricing per-request using the routed model.
+const FALLBACK_MODEL = 'gemini-2.5-pro-preview-05-06';
 const MAX_OUTPUT_TOKENS = 4096;
 
 // Cost per million tokens (USD) — gemini-2.5-pro pricing (<200k context)
@@ -58,12 +63,16 @@ export const geminiAdapter: ReviewEngine = {
   },
 
   async review(input: ReviewInput): Promise<ReviewOutput> {
-    const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+    const ctx = input.context as Record<string, unknown> | undefined;
+    const apiKeyEnv = (ctx?.['apiKeyEnv'] as string | undefined) ?? 'GEMINI_API_KEY';
+    // Honor both the resolved env var name (apiKeyEnv) and the legacy
+    // GOOGLE_API_KEY fallback that pre-routing users relied on.
+    const apiKey = process.env[apiKeyEnv] ?? process.env.GOOGLE_API_KEY;
     if (!apiKey) {
-      throw new GuardrailError('GEMINI_API_KEY (or GOOGLE_API_KEY) not set', { code: 'auth', provider: 'gemini' });
+      throw new GuardrailError(`${apiKeyEnv} (or GOOGLE_API_KEY) not set`, { code: 'auth', provider: 'gemini' });
     }
 
-    const model = (input.context as Record<string, unknown> | undefined)?.['model'] as string | undefined ?? DEFAULT_MODEL;
+    const model = (ctx?.['model'] as string | undefined) ?? FALLBACK_MODEL;
     const prompt = buildSystemPrompt(input, PROMPT_TEMPLATE).replace('{CONTENT}', input.content);
 
     const GoogleGenerativeAI = await loadGoogleGenerativeAI();
