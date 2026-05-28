@@ -12,7 +12,15 @@ export type ErrorCode =
   // v6.2.1 — orchestrator resume preflight refused to auto-decide; the run
   // requires explicit operator intervention (`--force-replay` or manual
   // ledger inspection). Emitted as a `replay.override`-eligible refusal.
-  | 'needs_human';
+  | 'needs_human'
+  // v8.6 — implement-phase schema-change manifest is missing entries
+  // (or carries orphans) relative to the actual diff. Caller-fixable.
+  | 'incomplete_phase_output'
+  // v8.6 — manifest entry violates a profile.schemaChangePolicy rule
+  // (NOT NULL without backfill, DROP COLUMN without deprecation, RLS
+  // weakening without security review, destructive without expand-
+  // contract, missing pairedWith PR).
+  | 'schema_policy_violation';
 
 export interface GuardrailErrorOptions {
   code: ErrorCode;
@@ -38,6 +46,10 @@ const DEFAULT_RETRYABLE: Record<ErrorCode, boolean> = {
   // v6.2.1 — needs_human is by definition a stop-the-pipeline signal; the
   // user (or `--force-replay`) decides whether to retry.
   needs_human: false,
+  // v8.6 — schema manifest fixups are caller-driven (agent must update
+  // the manifest). Not retryable.
+  incomplete_phase_output: false,
+  schema_policy_violation: false,
 };
 
 export class GuardrailError extends Error {
