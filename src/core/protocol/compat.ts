@@ -166,7 +166,18 @@ function hasPathInRange(
 /**
  * BFS over registered edges. Returns the ordered list of versions in
  * the chain (inclusive of from and to). Throws if no chain exists.
+ *
+ * Exported as `findChainSteps` so the loader can re-walk the chain
+ * for per-step intermediate validation (codex WARNING fix).
  */
+export function findChainSteps(
+  edges: ReadonlyArray<{ from: string; to: string }>,
+  from: string,
+  to: string,
+): string[] {
+  return findChain(edges, from, to);
+}
+
 function findChain(
   edges: ReadonlyArray<{ from: string; to: string }>,
   from: string,

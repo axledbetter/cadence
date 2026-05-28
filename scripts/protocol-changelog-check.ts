@@ -49,19 +49,48 @@ function gitCapture(args: string[]): string {
 }
 
 function resolveBase(): string {
-  // Prefer origin/master merge-base (CI default).
-  try {
-    return gitCapture(['merge-base', 'origin/master', 'HEAD']).trim();
-  } catch {
-    // Fall back to local master rev (worktrees / no remote).
+  // Codex WARNING fix — base ref resolution must tolerate:
+  //  - Repos using `main` instead of `master`
+  //  - CI providing the base ref via env (GITHUB_BASE_REF on GitHub Actions)
+  //  - Shallow checkouts where merge-base requires the remote fetched
+  //  - Local dev with no remote
+  //
+  // Precedence (highest first):
+  //   1. $PROTOCOL_CHANGELOG_BASE_REF — explicit override
+  //   2. $GITHUB_BASE_REF             — GitHub Actions PR context
+  //   3. origin/main, origin/master   — common remote defaults
+  //   4. main, master                 — local branch defaults
+  const override = process.env.PROTOCOL_CHANGELOG_BASE_REF;
+  const ghBase = process.env.GITHUB_BASE_REF;
+  const candidates: string[] = [];
+  if (override) candidates.push(override);
+  if (ghBase) {
+    candidates.push(`origin/${ghBase}`);
+    candidates.push(ghBase);
+  }
+  candidates.push('origin/main', 'origin/master', 'main', 'master');
+  for (const ref of candidates) {
     try {
-      return gitCapture(['rev-parse', 'master']).trim();
+      // Try merge-base first — proper "branch divergence" semantics.
+      return gitCapture(['merge-base', ref, 'HEAD']).trim();
     } catch {
-      throw new Error(
-        'Cannot resolve a comparison base — neither `origin/master` nor `master` exists.',
-      );
+      // Fall through to next candidate; do NOT silently fall back to
+      // rev-parse on the same ref — that would compare against the tip
+      // and miss commits made after divergence.
     }
   }
+  for (const ref of candidates) {
+    try {
+      return gitCapture(['rev-parse', ref]).trim();
+    } catch {
+      // continue
+    }
+  }
+  throw new Error(
+    'Cannot resolve a comparison base — none of these refs exist: ' +
+      candidates.join(', ') +
+      '. Set PROTOCOL_CHANGELOG_BASE_REF to override.',
+  );
 }
 
 export function runCheck(cwd: string = process.cwd()): CheckResult {

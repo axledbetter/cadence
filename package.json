@@ -80,6 +80,7 @@
     "skills/",
     "scripts/test-runner.mjs",
     "scripts/post-build-rewrite-imports.mjs",
+    "src/core/protocol/changelog.md",
     "CHANGELOG.md",
     "README.md"
   ],

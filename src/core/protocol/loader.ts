@@ -29,6 +29,7 @@ import addFormats from 'ajv-formats';
 import { findPackageRoot } from '../../cli/_pkg-root.ts';
 import {
   DEFAULT_REGISTRY,
+  findChainSteps,
   type MigrationRegistry,
   migrate,
   satisfies,
@@ -304,15 +305,43 @@ export function createProtocolLoader<T = unknown>(
     }
 
     // Stage 2 — migrate when older-needs-migration. exact / older-supported skip.
+    // Codex WARNING fix — per-step validation: each intermediate
+    // migration's output is validated against the NEXT version's schema
+    // before being fed into the next adapter. This catches a faulty
+    // 1.0.0->1.1.0 migration immediately at the 1.1.0 schema boundary
+    // rather than letting bad data cascade into 1.1.0->1.2.0 where the
+    // error message becomes misleading.
     let migrated = false;
     const warnings: string[] = [];
     let working: unknown = cloned;
     if (verdict === 'older-needs-migration') {
-      const result = migrate(working, declared, currentVersion, meta.kind as ComponentKind, {
-        registry: migrationRegistry,
-      });
-      working = result.value;
-      warnings.push(...result.warnings);
+      const chain = migrationRegistry.getEdges(meta.kind as ComponentKind);
+      const path = findChainSteps(chain, declared, currentVersion);
+      for (let i = 0; i < path.length - 1; i += 1) {
+        const stepFrom = path[i]!;
+        const stepTo = path[i + 1]!;
+        const stepResult = migrate(working, stepFrom, stepTo, meta.kind as ComponentKind, {
+          registry: migrationRegistry,
+        });
+        // Validate intermediate output against the step-to schema BEFORE
+        // continuing to the next migration (unless step-to is the
+        // current version — that's stage 3 below).
+        if (stepTo !== currentVersion) {
+          const intermediateValidator = resolveValidator(stepTo);
+          if (!intermediateValidator(stepResult.value)) {
+            const errors = (intermediateValidator.errors ?? []).slice(0, 5).map(formatAjvError);
+            throw new ProtocolError(
+              `${meta.kind}: intermediate migration output (${stepFrom}->${stepTo}) failed schema validation:\n  ${errors.join('\n  ')}`,
+              {
+                code: 'migration_failed',
+                details: { component: meta.kind, stepFrom, stepTo, errors: intermediateValidator.errors ?? [] },
+              },
+            );
+          }
+        }
+        working = stepResult.value;
+        for (const w of stepResult.warnings) warnings.push(w);
+      }
       migrated = true;
     }
 
