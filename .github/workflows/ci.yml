@@ -7,13 +7,12 @@ on:
     branches: [master]
     tags: ['v*']
   # Manual trigger — used to re-run Publish to npm against an existing
-  # tag with a freshly-rotated NPM_TOKEN. GitHub Actions reruns of a
-  # completed workflow read the secret-state from the original run; only
-  # a fresh workflow event picks up rotated secrets. Dispatch this
-  # workflow with the tag selected as the ref (GitHub UI "Use workflow
-  # from" dropdown supports tags) and the publish job reads github.ref_name
-  # as the tag and proceeds normally. No inputs needed — using inputs
-  # would create a potential workflow injection surface.
+  # tag if a transient failure (network blip, registry hiccup) killed the
+  # original run. With OIDC trusted publishing there's no shared secret to
+  # rotate; reruns work because the workflow gets a fresh OIDC token each
+  # run. Dispatch with the tag as the ref (GitHub UI "Use workflow from"
+  # dropdown supports tags). No inputs (would create a workflow-injection
+  # surface).
   workflow_dispatch: {}
   pull_request:
     branches: [master]
@@ -70,6 +69,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    # Gated environment — npm trusted-publisher policy on npmjs.com binds
+    # the OIDC identity to this exact environment name.
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write   # required for npm trusted publishing (OIDC)
 
     steps:
       - uses: actions/checkout@v6
@@ -79,6 +84,18 @@ jobs:
           node-version: '22'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing requires npm CLI >= 11.5. Node 22's bundled npm
+      # may be older; pin explicitly so OIDC isn't silently skipped.
+      - name: Pin npm to a trusted-publishing-capable version
+        run: |
+          npm install -g npm@^11.5.0
+          NPM_MAJOR=$(node -e "console.log(process.versions.npm.split('.').map(Number)[0])")
+          if [ "$NPM_MAJOR" -lt 11 ]; then
+            echo "npm $(npm --version) is too old for trusted publishing (need >=11.5.0)"
+            exit 1
+          fi
+          npm --version
 
       - run: npm ci
 
@@ -92,16 +109,12 @@ jobs:
             exit 1
           fi
 
-      - name: Publish
+      - name: Publish (OIDC + provenance)
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           VERSION="$REF_NAME"
-          # Phase 6 — strict semver tags (v1.2.3) → latest. Anything with a
-          # pre-release suffix (-pre, -alpha, -beta, -rc, …) → next.
-          # Source of truth for npm dist-tags; package.json publishConfig.tag
-          # is just the safer fallback when running `npm publish` by hand.
+          # Strict semver tags (v1.2.3) → latest. Pre-release suffix → next.
           if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then TAG="latest"; else TAG="next"; fi
           PKG_VERSION=$(node -p "require('./package.json').version")
           PKG_NAME=$(node -p "require('./package.json').name")
@@ -110,4 +123,13 @@ jobs:
             echo "Version $PKG_VERSION already published — skipping"
             exit 0
           fi
-          npm publish --access public --tag "$TAG"
+          # OIDC auth — no NODE_AUTH_TOKEN. npm CLI exchanges the GitHub
+          # workflow's OIDC token for an npm publish credential at the
+          # registry. Requires:
+          #   - permissions.id-token: write (above)
+          #   - npm trusted-publisher policy on npmjs.com bound to:
+          #       owner: axledbetter, repo: cadence,
+          #       workflow: .github/workflows/ci.yml,
+          #       environment: npm-publish
+          # --provenance attests the publish to the source commit + run.
+          npm publish --access public --tag "$TAG" --provenance
