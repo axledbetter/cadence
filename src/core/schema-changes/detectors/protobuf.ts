@@ -148,5 +148,46 @@ export async function detectProtobufChanges(input: DetectInput): Promise<SchemaC
       }
     }
   }
+
+  // Bugbot MEDIUM fix — detect REMOVED fields and REMOVED messages.
+  // Previously the loop only walked afterMsgs, so destructive proto
+  // changes silently passed cross-check with zero detector entries.
+  // We emit `unknown.unsupported_kind` since v8.6's SchemaChangeKind
+  // taxonomy doesn't have a dedicated `protobuf.remove_field` — but
+  // it's destructive (`additive: false`) and the manifest entry IS
+  // required, so the agent can't silently drop a removal.
+  for (const [msgName, before] of beforeMsgs) {
+    const afterMsg = afterMsgs.get(msgName);
+    if (!afterMsg) {
+      // Entire message removed — emit one entry per pre-existing field.
+      for (const [fname, bfield] of before) {
+        if (bfield.reserved) continue;
+        entries.push({
+          file: input.file,
+          kind: 'unknown.unsupported_kind',
+          objectName: msgName,
+          subObjectName: bfield.name,
+          statementIndex: statementIndex++,
+          additive: false,
+          description: `Remove field ${msgName}.${bfield.name} (message ${msgName} removed) — destructive, agent must hand-author manifest entry`,
+        });
+      }
+      continue;
+    }
+    for (const [fname, bfield] of before) {
+      if (bfield.reserved) continue;
+      if (!afterMsg.has(fname)) {
+        entries.push({
+          file: input.file,
+          kind: 'unknown.unsupported_kind',
+          objectName: msgName,
+          subObjectName: bfield.name,
+          statementIndex: statementIndex++,
+          additive: false,
+          description: `Remove field ${msgName}.${bfield.name} = ${bfield.number} — destructive, agent must hand-author manifest entry`,
+        });
+      }
+    }
+  }
   return entries;
 }

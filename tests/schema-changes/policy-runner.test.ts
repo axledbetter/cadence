@@ -93,4 +93,12 @@ describe('policy-runner — validates by reading implement artifact', () => {
     assert.equal(r.ok, false);
     assert.ok(r.issues.some((i) => i.code === 'manifest_shape_invalid'));
   });
+
+  it('corrupted artifact JSON → fail-CLOSED with manifest_shape_invalid (bugbot HIGH fix)', async () => {
+    const runDir = tmpRunDir();
+    fs.writeFileSync(path.join(runDir, 'artifacts', 'implement.json'), '{ broken json [[[');
+    const r = await runSchemaPolicyCheck({ runDir });
+    assert.equal(r.ok, false);
+    assert.ok(r.issues.some((i) => i.code === 'manifest_shape_invalid'));
+  });
 });

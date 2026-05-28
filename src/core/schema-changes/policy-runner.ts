@@ -36,11 +36,24 @@ export async function runSchemaPolicyCheck(opts: PolicyRunnerOpts): Promise<Poli
     // No implement phase ran yet — nothing to enforce.
     return { ok: true, issues: [], manifestPath: null };
   }
+  // Bugbot HIGH fix — corrupted JSON must FAIL CLOSED. Previously
+  // returned `ok: true` which let malformed artifacts bypass policy
+  // enforcement entirely, contradicting validate-phase's fail-CLOSED
+  // contract.
   let raw: unknown;
   try {
     raw = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
-  } catch {
-    return { ok: true, issues: [], manifestPath: artifactPath };
+  } catch (err) {
+    return {
+      ok: false,
+      manifestPath: artifactPath,
+      issues: [{
+        severity: 'block',
+        code: 'manifest_shape_invalid',
+        message: `implement.json could not be parsed as JSON: ${(err as Error).message}`,
+        entry: { file: artifactPath, kind: 'unknown.unparseable', additive: false, description: 'corrupted artifact' },
+      }],
+    };
   }
   const schemaChanges = (raw as { schemaChanges?: unknown }).schemaChanges;
   if (!schemaChanges) return { ok: true, issues: [], manifestPath: artifactPath };
