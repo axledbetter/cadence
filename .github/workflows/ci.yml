@@ -65,49 +65,8 @@ jobs:
       - name: Test
         run: node scripts/test-runner.mjs
 
-  publish:
-    name: Publish to npm
-    needs: test
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          registry-url: 'https://registry.npmjs.org'
-
-      - run: npm ci
-
-      - name: Validate tag matches package version
-        run: |
-          TAG_VERSION="${{ github.ref_name }}"
-          TAG_VERSION="${TAG_VERSION#v}"
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag ${{ github.ref_name }} does not match package.json version $PKG_VERSION"
-            exit 1
-          fi
-
-      - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          VERSION="$REF_NAME"
-          # Phase 6 — strict semver tags (v1.2.3) → latest. Anything with a
-          # pre-release suffix (-pre, -alpha, -beta, -rc, …) → next.
-          # Source of truth for npm dist-tags; package.json publishConfig.tag
-          # is just the safer fallback when running `npm publish` by hand.
-          if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then TAG="latest"; else TAG="next"; fi
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          PKG_NAME=$(node -p "require('./package.json').name")
-          EXISTING=$(npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null || echo "")
-          if [ "$EXISTING" = "$PKG_VERSION" ]; then
-            echo "Version $PKG_VERSION already published — skipping"
-            exit 0
-          fi
-          npm publish --access public --tag "$TAG"
+  # The `publish:` job was removed in the changesets-release-automation
+  # PR. Changesets owns publish now — see .github/workflows/release.yml
+  # and RELEASING.md. Tag pushes are still allowed (the `on: push tags`
+  # trigger above stays) for posterity / future tooling, but no longer
+  # trigger an npm publish on their own.

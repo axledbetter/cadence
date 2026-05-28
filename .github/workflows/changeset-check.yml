@@ -1,0 +1,80 @@
+name: Changeset check
+
+# Ensures every user-facing PR carries a `.changeset/*.md` file
+# describing its release entry. PRs touching only docs/tests/CI are
+# exempt via the path filter below. The auto-generated Version Packages
+# PR is exempt via the bot-author check.
+#
+# Spec: docs/superpowers/specs/2026-05-27-changesets-release-automation-design.md
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Changeset present
+    runs-on: ubuntu-latest
+    # Skip the auto-generated Version Packages PR — it DELETES the
+    # consumed `.changeset/*.md` files, so the gate would falsely fail
+    # the very PR required to cut a release.
+    if: github.actor != 'github-actions[bot]' && github.head_ref != 'changeset-release/master'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need full history so `git fetch origin master` can resolve
+          # the base ref for the gating check below.
+          fetch-depth: 0
+
+      # PR checkouts don't always have origin/master cached — fetch it
+      # explicitly.
+      - name: Fetch base ref
+        run: git fetch origin master:refs/remotes/origin/master
+
+      # Use POSITIVE include patterns + ignore list. Negative-only
+      # globs have ambiguous semantics in tj-actions/changed-files.
+      - name: Detect non-exempt changes
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            src/**
+            bin/**
+            scripts/**
+            presets/**
+            apps/**
+            packages/**
+            package.json
+            package-lock.json
+            tsconfig*.json
+          files_ignore: |
+            **/*.md
+            **/*.test.ts
+            docs/**
+
+      # Custom gate: count new `.changeset/*.md` files in the PR diff
+      # (excluding README.md / config.json). `npx changeset status`
+      # exits 0 even when there are no changesets — it's informational
+      # only — so we implement the gate ourselves.
+      - name: Verify changeset present
+        if: steps.changed.outputs.any_changed == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          ADDED=$(git diff --name-only --diff-filter=A "${BASE_SHA}".."${HEAD_SHA}" \
+            | grep '^\.changeset/' \
+            | grep -v '^\.changeset/README\.md$' \
+            | grep -v '^\.changeset/config\.json$' \
+            || true)
+          if [ -z "${ADDED}" ]; then
+            echo "::error::No .changeset/*.md file in this PR. Run \`npx changeset\` and commit the result. See RELEASING.md."
+            exit 1
+          fi
+          echo "Found changeset file(s):"
+          echo "${ADDED}"
