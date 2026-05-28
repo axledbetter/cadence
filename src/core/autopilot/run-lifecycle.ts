@@ -42,6 +42,13 @@ import {
   type VerifierProbes,
   type PhaseVerificationResult,
 } from './resume-verifier.ts';
+import type { SchemaChangeEntry } from '../schema-changes/types.ts';
+import {
+  crossCheckManifest,
+  reverseCheckManifest,
+} from '../schema-changes/validator.ts';
+import type { DiffProvider } from '../schema-changes/diff-provider.ts';
+import { filterByGlobs } from '../schema-changes/diff-provider.ts';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -79,6 +86,13 @@ export interface AutopilotCreateOpts {
   __clock?: () => number;
   /** Test seam — force-enable creation even when env flag is off. */
   __forceEnable?: boolean;
+  /**
+   * v8.6 — diff provider used by `endPhase('implement')` to detect schema
+   * changes for cross-check against `output.schemaChanges`. Injectable so
+   * tests can stub the diff source. In production, the harness passes
+   * `makeGitDiffProvider(repoRoot)`.
+   */
+  diffProvider?: DiffProvider;
 }
 
 export interface ResumeOpts {
@@ -108,6 +122,7 @@ export class AutopilotRun {
     private readonly lock: RunLockHandle,
     private _state: RunState,
     private readonly clock: () => number,
+    private readonly diffProvider?: DiffProvider,
   ) {}
 
   // -------- Static factories --------
@@ -160,6 +175,7 @@ export class AutopilotRun {
       created.lock,
       created.state,
       clock,
+      opts.diffProvider,
     );
   }
 
@@ -390,6 +406,11 @@ export class AutopilotRun {
     const validated = validation.value;
     const phaseIdx = SKILL_PHASES.indexOf(phase);
 
+    // v8.6 — schema-change manifest cross-check (implement phase only).
+    if (phase === 'implement') {
+      await this.enforceSchemaChangeManifest(validated as unknown as { schemaChanges?: SchemaChangeEntry[]; baseSha?: string });
+    }
+
     // Codex WARNING #4 fix: persist the full validated output as an
     // artifact alongside the event so resume can reconstruct
     // state.config.phaseOutputs even if state.json write fails after
@@ -494,6 +515,56 @@ export class AutopilotRun {
       );
     }
     return v.value;
+  }
+
+  /**
+   * v8.6 — gate ALL enforcement on profile.schemaPaths.length > 0.
+   * When the profile has not opted in, this is a no-op. When opted in:
+   *   1. Use diffProvider to collect changed files matching schemaPaths.
+   *   2. Lazy-load detectors; produce detector entries.
+   *   3. Cross-check (no missing manifest entries) + reverse-check (no
+   *      orphan manifest entries) against output.schemaChanges.
+   *   4. Throw GuardrailError('incomplete_phase_output') on any issue.
+   */
+  private async enforceSchemaChangeManifest(output: { schemaChanges?: SchemaChangeEntry[]; baseSha?: string }): Promise<void> {
+    const cfg = this.getCfg();
+    const schemaPaths = (cfg.profileSnapshot as { schemaPaths?: string[] })?.schemaPaths ?? [];
+    if (schemaPaths.length === 0) return;
+    if (!this.diffProvider) {
+      // Opted in but no diff provider — skip (validator runs later from
+      // scripts/validate.ts can still catch policy issues against the
+      // manifest, but cross-check requires diff). Emit a console hint.
+      // eslint-disable-next-line no-console
+      console.warn('[cadence] schemaPaths is non-empty but no diffProvider was injected; skipping cross-check.');
+      return;
+    }
+    const baseRef = output.baseSha ?? 'HEAD';
+    const diffEntries = await this.diffProvider.collectChangedFiles({ baseRef });
+    const matched = filterByGlobs(diffEntries, schemaPaths);
+    if (matched.length === 0) {
+      // No schema-defining files touched — manifest is allowed to be
+      // empty / absent.
+      return;
+    }
+
+    // Lazy-import the detectors so non-opted-in runs never pay the cost.
+    const { detectAllChanges } = await import('../schema-changes/detectors/index.ts');
+    const detected = await detectAllChanges(matched.map((d) => ({ path: d.path, beforeText: d.beforeText, afterText: d.afterText })));
+
+    const manifest = output.schemaChanges ?? [];
+    const cross = crossCheckManifest({ manifest, detected });
+    const reverse = reverseCheckManifest({ manifest, detected });
+    const issues = [...cross.issues, ...reverse.issues];
+    if (issues.length === 0) return;
+    const summary = issues.map((i) => `  - [${i.code}] ${i.message}`).join('\n');
+    throw new GuardrailError(
+      `endPhase('implement'): schema-change manifest does not match the diff. Issues:\n${summary}`,
+      {
+        code: 'incomplete_phase_output',
+        provider: 'autopilot-run-lifecycle',
+        details: { issues },
+      },
+    );
   }
 }
 
