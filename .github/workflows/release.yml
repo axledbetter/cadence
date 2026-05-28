@@ -17,6 +17,14 @@ on:
   push:
     branches: [master]
 
+# Codex CRITICAL (#233 pass 1): two quick master merges could race the
+# Version Packages PR update or, worse, mid-publish. cancel-in-progress
+# is false because aborting a half-done npm publish leaves the registry
+# + git tag + GH Release out of sync.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write       # create the Version Packages PR + push v* tag
   pull-requests: write  # open/update the Version Packages PR
@@ -32,8 +40,8 @@ jobs:
       #    GITHUB_TOKEN). Required because:
       #    - PRs/tag-pushes authored by the default GITHUB_TOKEN do NOT
       #      trigger downstream workflows (GitHub anti-recursion).
-      #    - The publish: script does `git push origin v$VERSION`; it
-      #      inherits whatever token actions/checkout persisted.
+      #    - scripts/release-publish.sh does `git push origin v$VERSION`;
+      #      it inherits whatever token actions/checkout persisted.
       - name: Mint app token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -52,7 +60,12 @@ jobs:
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm ci
+      # --ignore-scripts (codex WARNING fix #233): the credential
+      # helper now carries an app-write token; we don't want random
+      # postinstall scripts to be able to read it from git config.
+      # Release builds don't need any postinstall lifecycle hooks (the
+      # built artifacts in dist/ are what gets published).
+      - run: npm ci --ignore-scripts
 
       # Required for `git tag -a` and any commits changesets-action
       # creates on the Version Packages PR branch.
@@ -67,37 +80,29 @@ jobs:
       #   - If there are unmerged .changeset/*.md files: opens or
       #     updates the "Version Packages" PR.
       #   - If there are NONE but the package.json version > latest on
-      #     npm: runs the publish: script (publish to npm, tag, release).
+      #     npm: invokes the publish: script (which we extracted to
+      #     scripts/release-publish.sh per codex CRITICAL — keeping
+      #     non-trivial bash inline in the `publish:` input is unsafe
+      #     because the action's command-execution behavior is
+      #     simple-shell, not full bash semantics).
       - name: Changesets — open Version PR or publish
         uses: changesets/action@v1
         with:
           version: npx changeset version && npm install --package-lock-only --ignore-scripts
-          # We override changesets' default tag format (pkg@version) to
-          # match our existing v* discipline. --no-git-tag stops the
-          # default tag; we create vX.Y.Z explicitly. createGithubReleases
-          # is false because the action's release-creation is wired to
-          # the default tag format — we run `gh release create` ourselves
-          # against the v* tag.
-          publish: |
-            set -euo pipefail
-            npx changeset publish --no-git-tag
-            VERSION=$(node -p "require('./package.json').version")
-            git tag -a "v$VERSION" -m "Release v$VERSION"
-            git push origin "v$VERSION"
-            # Extract the top CHANGELOG.md section (between first two `## `
-            # headers) for use as the GitHub Release body.
-            awk '/^## /{c++} c==1{print} c==2{exit}' CHANGELOG.md > /tmp/release-notes.md
-            gh release create "v$VERSION" \
-              --title "v$VERSION" \
-              --notes-file /tmp/release-notes.md
-          createGithubReleases: false
+          publish: bash scripts/release-publish.sh
+          createGithubReleases: false   # the script handles release creation
           commit: "chore(release): version packages"
           title: "chore(release): version packages"
         env:
-          # The app token is what makes downstream CI trigger AND what
-          # `gh release create` authenticates with.
+          # The app token is what makes downstream CI trigger on the
+          # auto-PR AND what `gh release create` (inside the script)
+          # authenticates with.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # GITHUB_REPOSITORY is provided automatically by GitHub
+          # Actions; the script reads it for the `gh release` --repo
+          # flag.
           # Until npm trusted publishing (track 1, PR #232) lands, we
           # need an explicit NPM_TOKEN so the publish step doesn't
-          # half-succeed. Once #232 merges, delete this line.
+          # half-succeed (tag pushed, npm publish silently auth-failed).
+          # Once #232 merges, delete this line.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

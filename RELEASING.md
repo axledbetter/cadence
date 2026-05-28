@@ -94,13 +94,15 @@ CI run, and tag pushes wouldn't fire any tag-based automation.
 2. Name: `cadence-bot` (or any name — surfaced as the PR author).
 3. Homepage URL: `https://github.com/axledbetter/cadence`.
 4. Disable webhooks (uncheck "Active" under Webhook).
-5. **Permissions:**
-   - Repository → Contents: **Read & write**
-   - Repository → Pull requests: **Read & write**
-   - Repository → Workflows: **Read & write** (only needed if a future
-     PR ever modifies a `.github/workflows/*.yml` file; safe to enable
-     now).
-   - Repository → Metadata: **Read** (auto-granted).
+5. **Permissions (least-privilege per codex security review):**
+   - Repository → Contents: **Read & write** (push tags, push to the
+     Version Packages PR branch)
+   - Repository → Pull requests: **Read & write** (open/update the
+     Version Packages PR)
+   - Repository → Metadata: **Read** (auto-granted)
+   - Do NOT grant `Workflows: write` unless you specifically want the
+     bot to be able to modify `.github/workflows/*.yml` files. Our
+     release flow doesn't need it.
 6. **Where can this app be installed?** Only on this account.
 7. Click "Create GitHub App". Note the **App ID** displayed at the top
    of the next page.
