@@ -1,0 +1,103 @@
+name: Release
+
+# Changesets-driven release pipeline.
+#
+# After this lands, the release flow is:
+#   1. Land feature PRs (each with a `.changeset/*.md` file describing
+#      the user-visible change).
+#   2. Merge the auto-opened "Version Packages" PR. That triggers this
+#      workflow, which: bumps package.json, regenerates the lockfile,
+#      rewrites CHANGELOG.md, tags v$VERSION, publishes to npm, and
+#      creates a GitHub Release.
+#
+# Spec: docs/superpowers/specs/2026-05-27-changesets-release-automation-design.md
+# Plan: docs/superpowers/plans/2026-05-27-changesets-release-automation.md
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write       # create the Version Packages PR + push v* tag
+  pull-requests: write  # open/update the Version Packages PR
+  id-token: write       # OIDC for npm trusted publishing (lands w/ track 1)
+
+jobs:
+  release:
+    name: Changesets release
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Mint a GitHub App installation token BEFORE checkout so the
+      #    repo's credential helper uses the app token (not the default
+      #    GITHUB_TOKEN). Required because:
+      #    - PRs/tag-pushes authored by the default GITHUB_TOKEN do NOT
+      #      trigger downstream workflows (GitHub anti-recursion).
+      #    - The publish: script does `git push origin v$VERSION`; it
+      #      inherits whatever token actions/checkout persisted.
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CADENCE_BOT_APP_ID }}
+          private-key: ${{ secrets.CADENCE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      # Required for `git tag -a` and any commits changesets-action
+      # creates on the Version Packages PR branch.
+      - name: Configure git identity
+        env:
+          APP_ID: ${{ secrets.CADENCE_BOT_APP_ID }}
+        run: |
+          git config user.name "cadence-bot[bot]"
+          git config user.email "${APP_ID}+cadence-bot[bot]@users.noreply.github.com"
+
+      # The action does double duty:
+      #   - If there are unmerged .changeset/*.md files: opens or
+      #     updates the "Version Packages" PR.
+      #   - If there are NONE but the package.json version > latest on
+      #     npm: runs the publish: script (publish to npm, tag, release).
+      - name: Changesets — open Version PR or publish
+        uses: changesets/action@v1
+        with:
+          version: npx changeset version && npm install --package-lock-only --ignore-scripts
+          # We override changesets' default tag format (pkg@version) to
+          # match our existing v* discipline. --no-git-tag stops the
+          # default tag; we create vX.Y.Z explicitly. createGithubReleases
+          # is false because the action's release-creation is wired to
+          # the default tag format — we run `gh release create` ourselves
+          # against the v* tag.
+          publish: |
+            set -euo pipefail
+            npx changeset publish --no-git-tag
+            VERSION=$(node -p "require('./package.json').version")
+            git tag -a "v$VERSION" -m "Release v$VERSION"
+            git push origin "v$VERSION"
+            # Extract the top CHANGELOG.md section (between first two `## `
+            # headers) for use as the GitHub Release body.
+            awk '/^## /{c++} c==1{print} c==2{exit}' CHANGELOG.md > /tmp/release-notes.md
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --notes-file /tmp/release-notes.md
+          createGithubReleases: false
+          commit: "chore(release): version packages"
+          title: "chore(release): version packages"
+        env:
+          # The app token is what makes downstream CI trigger AND what
+          # `gh release create` authenticates with.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Until npm trusted publishing (track 1, PR #232) lands, we
+          # need an explicit NPM_TOKEN so the publish step doesn't
+          # half-succeed. Once #232 merges, delete this line.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

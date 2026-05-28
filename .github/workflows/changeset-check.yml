@@ -1,0 +1,73 @@
+name: Changeset check
+
+# Ensures every user-facing PR carries a `.changeset/*.md` file
+# describing its release entry. PRs touching only docs/tests/CI are
+# exempt via the path filter below. The auto-generated Version Packages
+# PR is exempt via the bot-author check.
+#
+# Spec: docs/superpowers/specs/2026-05-27-changesets-release-automation-design.md
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Changeset present
+    runs-on: ubuntu-latest
+    # Skip the auto-generated Version Packages PR — it DELETES the
+    # consumed `.changeset/*.md` files, so the gate would falsely fail
+    # the very PR required to cut a release.
+    if: github.actor != 'github-actions[bot]' && github.head_ref != 'changeset-release/master'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need full history so `git fetch origin master` can resolve
+          # the base ref for `npx changeset status --since=origin/master`.
+          fetch-depth: 0
+
+      # PR checkouts don't always have origin/master cached — fetch it
+      # explicitly so `changeset status --since` works.
+      - name: Fetch base ref
+        run: git fetch origin master:refs/remotes/origin/master
+
+      # Use POSITIVE include patterns + ignore list. Negative-only
+      # globs have ambiguous semantics in tj-actions/changed-files.
+      - name: Detect non-exempt changes
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            src/**
+            bin/**
+            scripts/**
+            presets/**
+            apps/**
+            packages/**
+            package.json
+            package-lock.json
+            tsconfig*.json
+          files_ignore: |
+            **/*.md
+            **/*.test.ts
+            docs/**
+
+      - uses: actions/setup-node@v6
+        if: steps.changed.outputs.any_changed == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` installs the locally pinned @changesets/cli so the
+      # check uses the same version as the release workflow (rather
+      # than whatever npx downloads).
+      - run: npm ci
+        if: steps.changed.outputs.any_changed == 'true'
+
+      - name: Verify changeset present
+        if: steps.changed.outputs.any_changed == 'true'
+        run: npx changeset status --since=origin/master
