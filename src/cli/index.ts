@@ -34,6 +34,8 @@ import { initMigrate, NoMigrationToolDetectedError } from './init-migrate.ts';
 import { runMigrate } from './migrate.ts';
 import { runDeploy, runDeployRollback, runDeployStatus } from './deploy.ts';
 import { runProfileCommand } from './profile.ts';
+import { runProtocolCommand, runProtocolPrint } from './protocol.ts';
+import { runProfileUpgradeCommand } from './profile-upgrade.ts';
 import { resolveProfile } from '../core/profile/resolver.ts';
 import { ProfileResolutionError, type ResolvedProfile } from '../core/profile/types.ts';
 import { ENV_VAR_NAME as PROFILE_ENV_VAR_NAME } from '../core/profile/resolver.ts';
@@ -113,6 +115,13 @@ const TSX_SOURCE_VALID = ['bundled', 'project', 'path'] as const;
       i -= 1;
     }
   }
+}
+
+// Protocol flag — print the cadence protocol version + per-component map.
+// Independent from the npm package version. Spec:
+// docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+if (args[0] === '--protocol') {
+  process.exit(runProtocolPrint());
 }
 
 // Version flag — read package.json via the shared package-root helper. Works
@@ -237,7 +246,7 @@ These are aliases for the flat subcommands; they still work without the 'advance
 // gc, delete, doctor) are dispatched inside its case block. The singular
 // `run resume` form is handled BEFORE the default `run` -> review dispatch
 // kicks in (see disambiguation block just below).
-const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'examples', 'profile', 'internal', 'help', '--help', '-h'] as const;
+const SUBCOMMANDS = ['init', 'run', 'runs', 'scan', 'report', 'explain', 'ignore', 'ci', 'pr', 'fix', 'costs', 'watch', 'hook', 'autoregress', 'baseline', 'triage', 'lsp', 'worker', 'mcp', 'test-gen', 'pr-desc', 'doctor', 'preflight', 'setup', 'council', 'migrate-v4', 'migrate', 'migrate-doctor', 'deploy', 'brainstorm', 'spec', 'plan', 'implement', 'review', 'validate', 'autopilot', 'examples', 'profile', 'protocol', 'internal', 'help', '--help', '-h'] as const;
 const VALUE_FLAGS = ['base', 'config', 'files', 'format', 'output', 'debounce', 'ask', 'focus', 'fail-on', 'note', 'reason', 'expires', 'profile', 'severity', 'prompt', 'context-file', 'path', 'adapter', 'ref', 'sha', 'spec', 'context', 'mode', 'phases', 'budget', 'stack'];
 
 // Bare invocation — no subcommand, no flags → show welcome guide
@@ -1387,10 +1396,31 @@ switch (subcommand) {
     // profile show`). With plain `args[1]` we'd misread the flag
     // value as the sub-verb and reject `learning` as unknown.
     const sub = args[subcommandIdx + 1];
+    // v8.6.0 — `profile upgrade <path> [--write]` is owned by the
+    // protocol-versioning layer (rewrites the file to the canonical
+    // current-protocol shape). Routed here so the `cadence profile`
+    // namespace stays unified.
+    if (sub === 'upgrade') {
+      const rest = args.slice(subcommandIdx + 2);
+      const code = await runProfileUpgradeCommand(rest);
+      process.exit(code);
+      break;
+    }
     const code = await runProfileCommand(sub ? [sub] : [], {
       cwd: process.cwd(),
       ...(globalProfileFlag !== undefined ? { flagProfile: globalProfileFlag } : {}),
     });
+    process.exit(code);
+    break;
+  }
+
+  case 'protocol': {
+    // v8.6.0 — cadence protocol changelog [--since=X.Y.Z]. The
+    // top-level `cadence --protocol` short-circuit lives earlier in
+    // this file (alongside --version). Spec:
+    // docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+    const rest = args.slice(subcommandIdx + 1);
+    const code = await runProtocolCommand(rest);
     process.exit(code);
     break;
   }

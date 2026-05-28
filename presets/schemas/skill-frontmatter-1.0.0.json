@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/skill-frontmatter-1.0.0.json",
+  "title": "SKILL.md YAML frontmatter — protocol 1.0.0",
+  "description": "Minimal contract for SKILL.md frontmatter at the 1.0.0 baseline. `additionalProperties: true` is intentional — skills carry arbitrary extension fields (allowed-tools, model preferences, etc.) and the protocol layer doesn't enumerate them. Future protocol bumps may tighten this.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "description"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "pattern": "^\\d+(\\.\\d+){0,2}$",
+      "description": "Cadence protocol version this skill targets."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Skill identifier — matches the directory name."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable summary surfaced when the skill is listed."
+    }
+  }
+}

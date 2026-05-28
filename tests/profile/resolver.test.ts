@@ -371,11 +371,18 @@ describe('resolveProfile — filename-mismatch detection', () => {
       const schemasDir = path.join(fakeRoot, 'presets', 'schemas');
       fs.mkdirSync(profilesDir, { recursive: true });
       fs.mkdirSync(schemasDir, { recursive: true });
-      // Copy real schema in.
+      // Copy real schema in. v8.6.0 — also copy the protocol-versioned
+      // `profile-1.0.0.json` since the protocol loader handshake now
+      // runs before the legacy strict check (codex CRITICAL fix —
+      // every loader returns canonical current-version DTO).
       const realRoot = path.resolve(import.meta.dirname ?? '', '..', '..');
       fs.copyFileSync(
         path.join(realRoot, 'presets', 'schemas', 'profile.schema.json'),
         path.join(schemasDir, 'profile.schema.json'),
+      );
+      fs.copyFileSync(
+        path.join(realRoot, 'presets', 'schemas', 'profile-1.0.0.json'),
+        path.join(schemasDir, 'profile-1.0.0.json'),
       );
       // Synthetic profile file where stem ≠ `profile` field.
       fs.writeFileSync(

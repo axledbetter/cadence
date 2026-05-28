@@ -7,6 +7,12 @@
   "additionalProperties": false,
   "required": ["profile", "description", "codex_passes"],
   "properties": {
+    "protocol_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "pattern": "^\\d+(\\.\\d+){0,2}$",
+      "description": "Cadence protocol version this profile targets. Optional — defaults to '1.0.0' (the v8.5.x ecosystem baseline). Loader normalizes '1' / '1.2' to full triplet before validation. See docs/superpowers/specs/2026-05-27-protocol-versioning-design.md."
+    },
     "profile": {
       "type": "string",
       "description": "Profile identifier. Must match the file's basename (without `.yaml`); the resolver enforces filename ↔ field equivalence after schema validation.",

@@ -127,6 +127,13 @@ export interface PhaseSnapshot {
  *  events.ndjson; this is a derived snapshot for O(1) status queries. */
 export interface RunState {
   schema_version: SchemaVersion;
+  /** Cadence protocol version (v8.6.0+). Optional — older state.json
+   *  files written before protocol versioning landed default to '1.0.0'
+   *  on read. The writer stamps the current PROTOCOL_VERSION on every
+   *  new snapshot. Separate concern from `schema_version` (the internal
+   *  v6/v7 wire format integer). Spec:
+   *  docs/superpowers/specs/2026-05-27-protocol-versioning-design.md. */
+  protocol_version?: string;
   runId: string;
   /** ULID generation time, ISO. */
   startedAt: string;

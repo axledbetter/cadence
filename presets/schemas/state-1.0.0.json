@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/state-1.0.0.json",
+  "title": "RunState snapshot — protocol 1.0.0",
+  "description": "Protocol-level shape of `state.json` written by the v6 run-state engine. The internal `schema_version` integer (v6/v7 wire format) is a separate concern owned by `RUN_STATE_SCHEMA_VERSION` in `src/core/run-state/types.ts`. `protocol_version` is the outer envelope used for ecosystem-level forward-compat. `additionalProperties: true` because the engine evolves more rapidly than the protocol — only the keys explicitly listed are protocol-stable.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "runId", "startedAt", "status", "phases", "currentPhaseIdx", "totalCostUSD", "lastEventSeq", "writerId", "cwd"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "pattern": "^\\d+(\\.\\d+){0,2}$",
+      "description": "Cadence protocol version this state.json conforms to."
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Internal v6 engine wire-format version (v6=1, v7=2). Not the same as protocol_version."
+    },
+    "runId":           { "type": "string", "minLength": 1 },
+    "startedAt":       { "type": "string", "minLength": 1 },
+    "endedAt":         { "type": "string" },
+    "status":          { "type": "string", "enum": ["pending", "running", "paused", "success", "failed", "aborted"] },
+    "phases":          { "type": "array" },
+    "currentPhaseIdx": { "type": "integer", "minimum": 0 },
+    "totalCostUSD":    { "type": "number", "minimum": 0 },
+    "lastEventSeq":    { "type": "integer", "minimum": 0 },
+    "writerId": {
+      "type": "object",
+      "required": ["pid", "hostHash"],
+      "properties": {
+        "pid":      { "type": "integer" },
+        "hostHash": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "cwd":             { "type": "string", "minLength": 1 },
+    "config":          { "type": "object" }
+  }
+}

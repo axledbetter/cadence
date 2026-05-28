@@ -58,6 +58,13 @@ export interface ProfileConfig {
    * through to env vars + adapter defaults.
    */
   phases?: Partial<Record<PhaseName, PhaseRoute>>;
+  /**
+   * Cadence protocol version this profile targets. Optional — when
+   * absent, defaults to '1.0.0' (the v8.5.x ecosystem baseline). The
+   * protocol loader normalizes / validates this; see
+   * docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+   */
+  protocol_version?: string;
 }
 
 export type ProfileResolutionSource = 'default' | 'file' | 'env' | 'flag';
