@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/phase-output-1.0.0.json",
+  "title": "Phase output envelope — protocol 1.0.0",
+  "description": "Generic envelope for any phase's output object. v1.0.0 is intentionally NOT per-phase (codex WARNING — the implementation-phase had its own schema in early drafts but the loader's `${schemaName}-${version}.json` lookup doesn't carry a phase axis). A future protocol bump may split this into phase-specific variants (e.g. `phase-output-implement-2.0.0.json`) via the `COMPONENT_META.schemaName` indirection.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["phase", "status"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "pattern": "^\\d+(\\.\\d+){0,2}$",
+      "description": "Cadence protocol version this phase output conforms to."
+    },
+    "phase":    { "type": "string", "minLength": 1 },
+    "status":   { "type": "string", "enum": ["succeeded", "failed", "skipped"] },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "meta": { "type": "object" }
+  }
+}

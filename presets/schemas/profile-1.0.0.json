@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/axledbetter/cadence/presets/schemas/profile-1.0.0.json",
+  "title": "User-type profile YAML — protocol 1.0.0",
+  "description": "Versioned copy of profile.schema.json snapshotted at protocol 1.0.0. The protocol loader uses this for stage-1/stage-3 validation; the un-versioned `profile.schema.json` remains the canonical reference for the current-shape strict check used by the resolver's downstream Ajv pass. Both must stay in lockstep for the v1.0.0 baseline — the CI changelog gate (`scripts/protocol-changelog-check.ts`) enforces that any schema change is paired with a `src/core/protocol/changelog.md` entry, and any future bump from 1.0.0 will introduce a new versioned file (`profile-1.1.0.json`) rather than mutate this one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "description", "codex_passes"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "default": "1.0.0",
+      "pattern": "^\\d+(\\.\\d+){0,2}$",
+      "description": "Cadence protocol version this profile targets. Optional — omitted profiles default to '1.0.0' (the v8.5.x ecosystem baseline). Loader normalizes '1' / '1.2' to full triplet before validation."
+    },
+    "profile": {
+      "type": "string",
+      "description": "Profile identifier. Must match the file's basename (without `.yaml`); the resolver enforces filename ↔ field equivalence after schema validation.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable one-line summary surfaced by `profile show` / `profile list` and the init prompt.",
+      "minLength": 1
+    },
+    "codex_passes": {
+      "type": "object",
+      "description": "Number of Codex review passes per risk tier. Each value is an integer in [0, 5]; 0 means skip Codex review entirely for that tier.",
+      "additionalProperties": false,
+      "required": ["low", "medium", "high"],
+      "properties": {
+        "low":    { "type": "integer", "minimum": 0, "maximum": 5 },
+        "medium": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "high":   { "type": "integer", "minimum": 0, "maximum": 5 }
+      }
+    },
+    "auto_merge": { "type": "boolean", "default": true },
+    "require_risk_frontmatter": { "type": "boolean", "default": false },
+    "pause_at_steps": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 0, "maximum": 9 }
+    },
+    "audit_log_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
+    },
+    "codex_explanations": { "type": "boolean", "default": false },
+    "pr_template_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\\\)(?!.*\\.\\.)[^\\\\]+$"
+    },
+    "contributor_policy": {
+      "type": ["object", "null"],
+      "default": null,
+      "additionalProperties": false,
+      "required": ["external_high_codex_passes", "membership_provider"],
+      "properties": {
+        "external_high_codex_passes": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "membership_provider": { "type": "string", "enum": ["github-org"] }
+      }
+    },
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review":        { "$ref": "#/$defs/phaseRoute" },
+        "council":       { "$ref": "#/$defs/phaseRoute" },
+        "bugbot_triage": { "$ref": "#/$defs/phaseRoute" }
+      }
+    }
+  },
+  "$defs": {
+    "phaseRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "anthropic", "openai", "google", "bedrock",
+            "azure", "cohere", "mistral", "openai-compatible"
+          ]
+        },
+        "model":   { "type": "string", "minLength": 1 },
+        "baseUrl": { "type": "string", "format": "uri" }
+      }
+    }
+  }
+}

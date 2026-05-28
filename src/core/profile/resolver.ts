@@ -38,6 +38,9 @@ import * as yaml from 'js-yaml';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import { findPackageRoot } from '../../cli/_pkg-root.ts';
+import { createProtocolLoader, FilesystemSchemaRegistry } from '../protocol/loader.ts';
+import { ensureMigrationsRegistered } from '../protocol/migrations/index.ts';
+import { ProtocolError } from '../protocol/errors.ts';
 import {
   ProfileResolutionError,
   type ProfileConfig,
@@ -183,6 +186,7 @@ function applyDefaults(raw: Partial<ProfileConfig>): ProfileConfig {
   // Schema has already enforced presence of required keys + type
   // constraints; this layer materializes the optional-key defaults so
   // every consumer sees a fully-populated ProfileConfig.
+  //
   // v8.6 — schemaPaths defaults to [] (opt-in gate). Once opted in, the
   // schemaChangePolicy booleans all default to true (safe by default).
   const schemaPaths = raw.schemaPaths ?? [];
@@ -195,7 +199,7 @@ function applyDefaults(raw: Partial<ProfileConfig>): ProfileConfig {
         blockRlsWeakeningWithoutSecurityReview: raw.schemaChangePolicy?.blockRlsWeakeningWithoutSecurityReview ?? true,
       }
     : (raw.schemaChangePolicy ?? {});
-  return {
+  const base: ProfileConfig = {
     profile: raw.profile as string,
     description: raw.description as string,
     codex_passes: raw.codex_passes as ProfileConfig['codex_passes'],
@@ -210,6 +214,39 @@ function applyDefaults(raw: Partial<ProfileConfig>): ProfileConfig {
     schemaConsumers,
     schemaChangePolicy,
   };
+  if (raw.protocol_version !== undefined) {
+    base.protocol_version = raw.protocol_version;
+  }
+  if (raw.phases !== undefined) {
+    base.phases = raw.phases;
+  }
+  return base;
+}
+
+// -- Protocol loader for profile.yaml -----------------------------------
+// Lazy-instantiated per packageRoot. The loader normalizes the declared
+// `protocol_version` field (default '1.0.0') and validates the YAML
+// against `profile-${declared}.json` then `profile-${current}.json`
+// per the 3-stage pipeline. Spec:
+// docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+const _profileProtocolLoaderCache = new Map<string, ReturnType<typeof createProtocolLoader>>();
+
+function getProfileProtocolLoader(packageRoot: string): ReturnType<typeof createProtocolLoader> {
+  const cached = _profileProtocolLoaderCache.get(packageRoot);
+  if (cached) return cached;
+  ensureMigrationsRegistered();
+  const loader = createProtocolLoader({
+    component: 'profile',
+    schemaRegistry: new FilesystemSchemaRegistry(packageRoot),
+  });
+  _profileProtocolLoaderCache.set(packageRoot, loader);
+  return loader;
+}
+
+/** Test-only — clear the protocol-loader cache (used when swapping
+ *  synthetic package roots). */
+export function _resetProfileProtocolLoaderCache(): void {
+  _profileProtocolLoaderCache.clear();
 }
 
 /**
@@ -255,6 +292,32 @@ function loadProfileByName(
         details: { cause: err instanceof Error ? err.message : String(err) },
       },
     );
+  }
+  // Protocol-loader handshake (v1.0.0+). Normalizes `protocol_version`,
+  // runs migrations if needed, and returns the canonical current-shape
+  // DTO. The legacy strict Ajv check below then validates the canonical
+  // result — both schemas accept `protocol_version`, so the two passes
+  // don't conflict. Spec: docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+  if (parsed && typeof parsed === 'object') {
+    try {
+      parsed = getProfileProtocolLoader(packageRoot).load(parsed).value;
+    } catch (err) {
+      if (err instanceof ProtocolError) {
+        throw new ProfileResolutionError(
+          `Profile "${name}" failed protocol-loader handshake (${err.code}): ${err.message}`,
+          {
+            code: 'schema_violation',
+            source,
+            details: {
+              protocol_code: err.code,
+              ...err.details,
+            },
+            ...(err.hint !== undefined ? { hint: err.hint } : {}),
+          },
+        );
+      }
+      throw err;
+    }
   }
   const validate = getValidator(packageRoot);
   if (!validate(parsed)) {

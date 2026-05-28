@@ -18,6 +18,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { GuardrailError } from '../errors.ts';
+import { PROTOCOL_VERSION } from '../protocol/version.ts';
 import { appendEvent, replayState } from './events.ts';
 import { RUN_STATE_SCHEMA_VERSION, type RunState, type WriterId } from './types.ts';
 
@@ -59,7 +60,16 @@ function tmpPath(runDir: string): string {
  *  rename leaves the previous snapshot intact. */
 export function writeStateSnapshot(runDir: string, state: RunState): void {
   fs.mkdirSync(runDir, { recursive: true });
-  const data = JSON.stringify(state, null, 2);
+  // Stamp the cadence protocol_version on every snapshot we write (v8.6.0+).
+  // The field is additive and lives alongside the internal `schema_version`
+  // (separate concern — engine wire format). Old binaries reading newer
+  // snapshots ignore unknown top-level fields, so rollback is clean.
+  // Spec: docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
+  const stateWithProtocol: RunState = {
+    ...state,
+    protocol_version: state.protocol_version ?? PROTOCOL_VERSION,
+  };
+  const data = JSON.stringify(stateWithProtocol, null, 2);
   const tmp = tmpPath(runDir);
   const target = statePath(runDir);
 
