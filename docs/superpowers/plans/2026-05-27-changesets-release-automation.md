@@ -44,50 +44,102 @@ Per spec section 5, with these load-bearing details:
 
 - Triggers on `push` to `master`.
 - `permissions: contents: write, pull-requests: write, id-token: write`.
-- Uses `changesets/action@v1`.
-- `version: npx changeset version && npm install --package-lock-only` —
-  the `npm install --package-lock-only` step regenerates the lockfile so
-  the auto-PR carries a matching `package-lock.json`. Without this, the
-  version-bump PR would have a stale lock and fail `npm ci` in CI.
-- `publish:` script overrides default tag format:
-  ```bash
-  npx changeset publish --no-git-tag
-  VERSION=$(node -p "require('./package.json').version")
-  git tag -a "v$VERSION" -m "Release v$VERSION"
-  git push origin "v$VERSION"
+- **App token is minted BEFORE checkout, and used everywhere** (codex
+  CRITICAL fix). Without this, `actions/checkout` persists the default
+  `GITHUB_TOKEN` as the credential helper, and `git push origin
+  "v$VERSION"` would push with that token — meaning the tag push is
+  bot-author = `github-actions[bot]` and does NOT trigger downstream
+  workflows on the tag. Shape:
+  ```yaml
+  steps:
+    - uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+        app-id: ${{ secrets.CADENCE_BOT_APP_ID }}
+        private-key: ${{ secrets.CADENCE_BOT_PRIVATE_KEY }}
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        token: ${{ steps.app-token.outputs.token }}   # persisted credential helper
+    - uses: actions/setup-node@v6
+      with: { node-version: '22', cache: npm, registry-url: 'https://registry.npmjs.org' }
+    - run: npm ci
+    - name: Configure git identity for tagging
+      run: |
+        git config user.name "cadence-bot[bot]"
+        git config user.email "${{ secrets.CADENCE_BOT_APP_ID }}+cadence-bot[bot]@users.noreply.github.com"
+    - uses: changesets/action@v1
+      with:
+        version: npx changeset version && npm install --package-lock-only --ignore-scripts
+        publish: |
+          npx changeset publish --no-git-tag
+          VERSION=$(node -p "require('./package.json').version")
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file <(awk '/^## /{c++} c==1{print} c==2{exit}' CHANGELOG.md)
+        createGithubReleases: false   # we create it ourselves above (codex WARNING fix)
+      env:
+        GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}   # changesets-action AND gh CLI auth
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}            # see "publish auth" below
   ```
-- `createGithubReleases: true` — auto-creates GitHub Release with
-  CHANGELOG body off the `v$VERSION` tag.
-- Auth: uses an **app token** from `secrets.CADENCE_BOT_APP_ID` +
-  `secrets.CADENCE_BOT_PRIVATE_KEY` via
-  `actions/create-github-app-token@v1`. PRs opened with default
-  `GITHUB_TOKEN` don't trigger downstream workflows (GitHub
-  anti-recursion); app-token PRs do.
-- No `NPM_TOKEN` env var here — trusted publishing (track 1, parallel)
-  will land OIDC via `id-token: write`. Until that ships, the publish
-  step will fail; if track 1 hasn't merged when this lands, we add a
-  temporary `NODE_AUTH_TOKEN: secrets.NPM_TOKEN` fallback line. We'll
-  check track 1's status before finalizing.
+- `version: npx changeset version && npm install --package-lock-only --ignore-scripts` —
+  regenerates the lockfile so the auto-PR carries a matching
+  `package-lock.json`. `--ignore-scripts` prevents lifecycle scripts
+  from running during lockfile regen (codex NOTE fix).
+- **Publish auth (codex CRITICAL fix):** Track 1 (npm trusted
+  publishing via OIDC) is in flight in parallel. Until it merges,
+  `NODE_AUTH_TOKEN: secrets.NPM_TOKEN` is wired so the first publish
+  doesn't half-succeed (tag pushed but no npm publish). Once track 1
+  lands, we remove `NODE_AUTH_TOKEN` and rely on OIDC. We will check
+  track 1's status during implementation and, if it's already merged,
+  drop the NPM_TOKEN fallback.
+- **GitHub Release creation (codex WARNING fix):** `changesets/action`'s
+  `createGithubReleases` is wired to its native `pkg@version` tag
+  format. Since we're using `--no-git-tag` + explicit `v$VERSION`, we
+  set `createGithubReleases: false` and run `gh release create`
+  ourselves in the publish script. The awk extracts the top
+  CHANGELOG.md section (between the first two `## ` headers) as
+  release body.
 
 ### 4. `.github/workflows/changeset-check.yml` (new)
 
-Per spec section 7, with the two-layer exemption:
+Per spec section 7, with the two-layer exemption AND codex CRITICAL
+fixes for checkout depth + install + positive-pattern path filter:
 
 - **Bot exemption:**
   `if: github.actor != 'github-actions[bot]' && github.head_ref != 'changeset-release/master'`
   — skips entire job for the auto-generated Version Packages PR (which
   deletes consumed changeset files, so the gate would falsely fail it).
-- **Path filter** via `tj-actions/changed-files@v45`:
+- **Checkout with `fetch-depth: 0` AND explicit `git fetch origin master`**
+  so `npx changeset status --since=origin/master` can resolve the
+  base ref (codex CRITICAL — PR checkouts don't have origin/master by
+  default).
+- **`npm ci` before `npx changeset status`** — uses the
+  locally-installed `@changesets/cli` (deterministic version) rather
+  than letting `npx` download whatever's latest (codex CRITICAL).
+- **Path filter** via `tj-actions/changed-files@v45` — uses
+  POSITIVE includes + explicit ignores rather than negative-only
+  patterns (codex WARNING — negative-only globs have ambiguous
+  semantics in this action):
   ```yaml
   files: |
-    !docs/**
-    !**/*.md
-    !.github/**
-    !**/*.test.ts
+    src/**
+    bin/**
+    scripts/**
+    presets/**
+    apps/**
+    packages/**
+    package.json
+    package-lock.json
+    tsconfig*.json
+  files_ignore: |
+    **/*.md
+    **/*.test.ts
+    docs/**
   ```
-  Docs/test/CI-only PRs don't need a changeset.
 - `npx changeset status --since=origin/master` is the actual check —
-  fails if no `.changeset/*.md` files present in the diff.
+  fails if no `.changeset/*.md` files present in the diff. Skipped if
+  `steps.changed.outputs.any_changed == 'false'`.
 
 ### 5. `.github/pull_request_template.md` (new)
 
@@ -128,12 +180,18 @@ worktree to preview output. If it would rewrite the header, add a
 "sentinel" first-PR changeset documenting the changesets adoption
 itself.
 
-Actually simpler: this PR ships WITHOUT a changeset (changeset-check
-exempts it because it touches only `.github/**` + new files in
-`.changeset/`). The NEXT PR that ships a user-visible change adds the
-first changeset. The CHANGELOG header for v8.6.0 will then be written
-by changesets-action. Existing v8.5.0 and earlier entries are
-untouched (changesets only appends — it doesn't rewrite history).
+Actually simpler: this PR ships WITHOUT a changeset because the
+`changeset-check.yml` workflow is NOT yet active on `master` (it's
+introduced by this PR). Self-consistency from day one is satisfied by
+the fact that the gate cannot enforce against the PR that creates the
+gate (codex WARNING fix — the original "only touches .github/**"
+exemption claim was wrong since this PR also modifies package.json /
+package-lock.json which the path filter does NOT exempt).
+
+The NEXT PR that ships a user-visible change adds the first
+changeset. The CHANGELOG header for v8.6.0 will then be written by
+changesets-action. Existing v8.5.0 and earlier entries are untouched
+(changesets only appends — it doesn't rewrite history).
 
 ### 8. `RELEASING.md` (new)
 
@@ -144,8 +202,17 @@ New doc covering:
   feature change.
 - **What the bot does:** opens/updates a "Version Packages" PR after
   master push; merging it triggers tag + publish + GitHub Release.
-- **Emergency manual release:** still works — `git tag -a vX.Y.Z && git
-  push origin vX.Y.Z` bypasses the bot.
+- **Emergency manual release (corrected per codex WARNING):** After
+  this PR lands, `git tag -a vX.Y.Z && git push origin vX.Y.Z` ONLY
+  creates the git tag — it does NOT trigger npm publish (we deleted
+  the tag-triggered publish job). The supported emergency path is:
+  1. Bump `package.json` version manually on master.
+  2. From a maintainer workstation: `npm publish --access public`
+     (after `npm whoami` confirms auth).
+  3. `git tag -a vX.Y.Z && git push origin vX.Y.Z` for the record.
+  4. `gh release create vX.Y.Z` for the GitHub Release.
+  This is intentionally inconvenient — the changesets flow is the
+  paved path; emergency manual release is meant to be a last resort.
 - **One-time setup for the user:**
   1. Create a GitHub App on `axledbetter/cadence`:
      - Repo permissions: Contents (write), Pull requests (write),
