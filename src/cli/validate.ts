@@ -4,6 +4,9 @@ import { loadConfig } from '../core/config/loader.ts';
 import type { GuardrailConfig } from '../core/config/types.ts';
 import { type RunPhase } from '../core/run-state/phase-runner.ts';
 import { runPhaseWithLifecycle } from '../core/run-state/run-phase-with-lifecycle.ts';
+import { runSchemaPolicyCheck } from '../core/schema-changes/policy-runner.ts';
+import { resolveProfile } from '../core/profile/resolver.ts';
+import { GuardrailError } from '../core/errors.ts';
 
 const C = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -133,7 +136,74 @@ export async function runValidate(options: ValidateCommandOptions = {}): Promise
     return 1;
   }
 
+  // v8.6 — enforce schema-change policy on the most recent implement
+  // artifact when the profile opts in. Best-effort: errors are surfaced
+  // but never crash the verb; the verdict is appended to the validate log.
+  try {
+    const policyResult = await enforceSchemaChangePolicyForCwd(cwd);
+    if (!policyResult.ok) {
+      const lines = ['', '## Schema-change policy violations', ''];
+      for (const issue of policyResult.issues) {
+        lines.push(`- [${issue.severity}] ${issue.code}: ${issue.message}`);
+      }
+      fs.appendFileSync(output.validateLogPath, lines.join('\n') + '\n', 'utf8');
+      // Print to stderr too.
+      for (const line of lines) process.stderr.write(line + '\n');
+      // Throw a typed error so the caller's exit code reflects the block.
+      throw new GuardrailError(
+        `schema-change policy violations (${policyResult.issues.length})`,
+        { code: 'schema_policy_violation', provider: 'validate', details: { issues: policyResult.issues } },
+      );
+    }
+  } catch (err) {
+    if (err instanceof GuardrailError && err.code === 'schema_policy_violation') {
+      return 1;
+    }
+    // Non-blocking failures from the policy check itself — log and continue.
+    process.stderr.write(`[validate] schema policy check skipped: ${(err as Error).message}\n`);
+  }
+
   return renderValidateOutput(output, validateInput);
+}
+
+/**
+ * v8.6 — read the latest implement artifact + the resolved profile, then
+ * run enforcePolicy. Returns `{ ok: true, issues: [] }` when no profile,
+ * no opt-in, or no artifact. Errors thrown by the resolver are swallowed
+ * to keep validate non-blocking on profile-resolution edge cases.
+ */
+async function enforceSchemaChangePolicyForCwd(cwd: string): Promise<{ ok: boolean; issues: Awaited<ReturnType<typeof runSchemaPolicyCheck>>['issues'] }> {
+  let schemaPaths: string[] = [];
+  let policy: import('../core/profile/types.ts').SchemaChangePolicy | undefined;
+  try {
+    const resolved = await resolveProfile({ cwd });
+    schemaPaths = resolved.config.schemaPaths ?? [];
+    policy = resolved.config.schemaChangePolicy;
+  } catch {
+    return { ok: true, issues: [] };
+  }
+  if (schemaPaths.length === 0) return { ok: true, issues: [] };
+  const runDir = findLatestRunDir(cwd);
+  if (!runDir) return { ok: true, issues: [] };
+  const opts: Parameters<typeof runSchemaPolicyCheck>[0] = { runDir };
+  if (policy) opts.policy = policy;
+  const r = await runSchemaPolicyCheck(opts);
+  return { ok: r.ok, issues: r.issues };
+}
+
+function findLatestRunDir(cwd: string): string | null {
+  const runsRoot = path.join(cwd, '.claude', 'autopilot', 'runs');
+  if (!fs.existsSync(runsRoot)) return null;
+  try {
+    const entries = fs.readdirSync(runsRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => ({ name: d.name, mtime: fs.statSync(path.join(runsRoot, d.name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (entries.length === 0) return null;
+    return path.join(runsRoot, entries[0]!.name);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

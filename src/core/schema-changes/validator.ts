@@ -69,6 +69,13 @@ export function crossCheckManifest(opts: {
   return { ok: issues.length === 0, issues };
 }
 
+/**
+ * Reverse-check: flag manifest entries that have no matching detected change.
+ * (We intentionally do NOT support an `additiveOverride` escape hatch — every
+ * manifest entry must correspond to a real diff, full stop. A future v8.7 may
+ * add a typed override field with reviewer evidence; until then, the
+ * reverse-check is strict.)
+ */
 export function reverseCheckManifest(opts: {
   manifest: SchemaChangeEntry[];
   detected: SchemaChangeEntry[];

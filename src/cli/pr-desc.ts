@@ -1,7 +1,10 @@
 import type { Finding } from '../core/findings/types.ts';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import { appendCostLog } from '../core/persist/cost-log.ts';
+import { injectIntoPrBody } from '../core/schema-changes/pr-template.ts';
+import { validateSchemaChanges } from '../core/schema-changes/types.ts';
 
 export interface PrDescOptions {
   base?: string;
@@ -125,7 +128,13 @@ export async function runPrDesc(options: PrDescOptions): Promise<PrDescResult> {
   const firstSummaryLine = rawOutput.split('\n')
     .map(l => l.trim())
     .find(l => /^[-*•]\s/.test(l));
-  const { title, body } = parseDescription(rawOutput, { branchName, firstSummaryLine });
+  const { title, body: rawBody } = parseDescription(rawOutput, { branchName, firstSummaryLine });
+
+  // v8.6 — inject schema-changes manifest if the implement-phase artifact
+  // exists. Idempotent: if the body already has the rendered block, it gets
+  // replaced. If no artifact, the marker (if present in the model output) is
+  // stripped to an empty block.
+  const body = injectSchemaChangesIfPresent(rawBody, options._cwd ?? process.cwd());
 
   const formatted = `Title: ${title}\n\n---\n${body}`;
 
@@ -247,4 +256,38 @@ async function createPr(title: string, body: string, yes: boolean): Promise<PrDe
   const prUrl = result.stdout.trim();
   process.stdout.write(`\nPR created: ${prUrl}\n`);
   return { title, body, prUrl };
+}
+
+
+// ---------------------------------------------------------------------------
+// v8.6 — schema-change manifest injection
+// ---------------------------------------------------------------------------
+
+/**
+ * If `.claude/autopilot/runs/<latest>/artifacts/implement.json` exists with a
+ * `schemaChanges` array, render it into the PR body via
+ * `injectIntoPrBody()`. No-op if absent (back-compat). Errors are swallowed
+ * so PR body rendering never blocks on a stale artifact.
+ */
+function injectSchemaChangesIfPresent(body: string, cwd: string): string {
+  try {
+    const runsDir = path.join(cwd, ".claude", "autopilot", "runs");
+    if (!fs.existsSync(runsDir)) return body;
+    const entries = fs.readdirSync(runsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => ({ name: d.name, mtime: fs.statSync(path.join(runsDir, d.name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const { name } of entries) {
+      const artifact = path.join(runsDir, name, "artifacts", "implement.json");
+      if (!fs.existsSync(artifact)) continue;
+      const raw = JSON.parse(fs.readFileSync(artifact, "utf8")) as { schemaChanges?: unknown };
+      if (!raw.schemaChanges) return body;
+      const v = validateSchemaChanges(raw.schemaChanges);
+      if (!v.ok) return body;
+      return injectIntoPrBody(body, v.value);
+    }
+  } catch {
+    // best-effort
+  }
+  return body;
 }
