@@ -186,6 +186,19 @@ function applyDefaults(raw: Partial<ProfileConfig>): ProfileConfig {
   // Schema has already enforced presence of required keys + type
   // constraints; this layer materializes the optional-key defaults so
   // every consumer sees a fully-populated ProfileConfig.
+  //
+  // v8.6 — schemaPaths defaults to [] (opt-in gate). Once opted in, the
+  // schemaChangePolicy booleans all default to true (safe by default).
+  const schemaPaths = raw.schemaPaths ?? [];
+  const schemaConsumers = raw.schemaConsumers ?? [];
+  const schemaChangePolicy = schemaPaths.length > 0
+    ? {
+        destructiveRequiresExpandContract: raw.schemaChangePolicy?.destructiveRequiresExpandContract ?? true,
+        blockNotNullWithoutBackfill: raw.schemaChangePolicy?.blockNotNullWithoutBackfill ?? true,
+        blockDropColumnWithoutDeprecation: raw.schemaChangePolicy?.blockDropColumnWithoutDeprecation ?? true,
+        blockRlsWeakeningWithoutSecurityReview: raw.schemaChangePolicy?.blockRlsWeakeningWithoutSecurityReview ?? true,
+      }
+    : (raw.schemaChangePolicy ?? {});
   const base: ProfileConfig = {
     profile: raw.profile as string,
     description: raw.description as string,
@@ -197,6 +210,9 @@ function applyDefaults(raw: Partial<ProfileConfig>): ProfileConfig {
     codex_explanations: raw.codex_explanations ?? false,
     pr_template_path: raw.pr_template_path ?? null,
     contributor_policy: raw.contributor_policy ?? null,
+    schemaPaths,
+    schemaConsumers,
+    schemaChangePolicy,
   };
   if (raw.protocol_version !== undefined) {
     base.protocol_version = raw.protocol_version;

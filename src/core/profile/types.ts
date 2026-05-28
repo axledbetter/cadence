@@ -41,6 +41,17 @@ export interface PhaseRoute {
   baseUrl?: string;
 }
 
+export interface SchemaChangePolicy {
+  /** Block destructive schema changes that don't carry an expandContract plan. Default true. */
+  destructiveRequiresExpandContract?: boolean;
+  /** Block SET NOT NULL / NOT NULL ADD COLUMN without policyEvidence.backfillSql. Default true. */
+  blockNotNullWithoutBackfill?: boolean;
+  /** Block DROP COLUMN without policyEvidence.deprecation.introducedIn. Default true. */
+  blockDropColumnWithoutDeprecation?: boolean;
+  /** Block disable_rls / drop_policy / revoke without policyEvidence.securityReview.reviewer. Default true. */
+  blockRlsWeakeningWithoutSecurityReview?: boolean;
+}
+
 export interface ProfileConfig {
   profile: string;
   description: string;
@@ -65,6 +76,21 @@ export interface ProfileConfig {
    * docs/superpowers/specs/2026-05-27-protocol-versioning-design.md.
    */
   protocol_version?: string;
+  /**
+   * v8.6 schema-change manifest opt-in.
+   *
+   * `schemaPaths` is the **gate** — empty array means schema-change
+   * enforcement is OFF (back-compat default). When non-empty, the
+   * implement phase requires a manifest entry for every detected
+   * semantic change in any matching file.
+   *
+   * Spec: docs/superpowers/specs/2026-05-27-schema-change-manifests-design.md
+   */
+  schemaPaths?: string[];
+  /** Downstream dependents notified about schema changes (other repos / service IDs). */
+  schemaConsumers?: string[];
+  /** Policy gates evaluated by the validate phase. All default true ONCE opted in. */
+  schemaChangePolicy?: SchemaChangePolicy;
 }
 
 export type ProfileResolutionSource = 'default' | 'file' | 'env' | 'flag';

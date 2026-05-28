@@ -117,9 +117,14 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.97.0",
     "cohere-ai": "^7.15.0",
+    "libpg-query": "^18.0.1",
+    "graphql": "^16.10.0",
+    "protobufjs": "^7.4.0",
     "openai": ">=4"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
     "@types/js-yaml": "^4",
     "@types/node": "^25",
     "@types/proper-lockfile": "^4.1.4",

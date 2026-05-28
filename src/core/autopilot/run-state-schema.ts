@@ -7,6 +7,10 @@
 // Plan: docs/superpowers/plans/2026-05-27-autopilot-run-state-integration.md
 
 import * as crypto from 'node:crypto';
+import {
+  type SchemaChangeEntry,
+  validateSchemaChanges,
+} from '../schema-changes/types.ts';
 
 // ---------------------------------------------------------------------------
 // Skill phase model
@@ -84,6 +88,18 @@ export interface ImplementPhaseOutput {
   headSha: string;
   commits: string[];
   cleanAtComplete: boolean;
+  /**
+   * Typed manifest of every semantic schema change introduced by this
+   * implement phase. ONE ENTRY PER SEMANTIC CHANGE — a SQL migration with
+   * five statements emits five entries.
+   *
+   * Optional at the schema level — only required when
+   * `profile.schemaPaths.length > 0`. The lifecycle/validate paths gate
+   * enforcement on that profile setting.
+   *
+   * Spec: docs/superpowers/specs/2026-05-27-schema-change-manifests-design.md
+   */
+  schemaChanges?: SchemaChangeEntry[];
 }
 
 export interface MigrateAppliedRecord {
@@ -244,6 +260,13 @@ function validateImplement(output: unknown): ValidateResult<ImplementPhaseOutput
   if (typeof o.cleanAtComplete !== 'boolean') {
     return failR('implement.cleanAtComplete must be boolean');
   }
+  // schemaChanges is optional — when present, validate shape.
+  let schemaChanges: SchemaChangeEntry[] | undefined;
+  if (o.schemaChanges !== undefined) {
+    const r = validateSchemaChanges(o.schemaChanges);
+    if (!r.ok) return failR(`implement.${r.error}`);
+    schemaChanges = r.value;
+  }
   return {
     ok: true,
     value: {
@@ -251,6 +274,7 @@ function validateImplement(output: unknown): ValidateResult<ImplementPhaseOutput
       headSha: o.headSha as string,
       commits: o.commits as string[],
       cleanAtComplete: o.cleanAtComplete,
+      ...(schemaChanges !== undefined ? { schemaChanges } : {}),
     },
   };
 }
