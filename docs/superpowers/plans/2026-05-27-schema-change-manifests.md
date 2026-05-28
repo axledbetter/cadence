@@ -28,12 +28,20 @@ The full taxonomy and types from spec §2:
 - `SchemaChangeKind` — Postgres-aware: DDL + RLS / grants / functions /
   views / triggers + data + GraphQL + OpenAPI + protobuf + TypeScript +
   `unknown.unparseable` / `unknown.unsupported_kind`.
-- `PolicyEvidence { backfillSql?, deprecation?, compatibilityNotes? }`.
+- `PolicyEvidence { backfillSql?, deprecation?, compatibilityNotes?,
+  securityReview? }` — **codex CRITICAL fix**: added
+  `securityReview: { reviewer, notes, approvedAt? }` so
+  `blockRlsWeakeningWithoutSecurityReview` has a concrete evidence slot.
 - `ExpandContractEvidence { phase, pairedWith?, requiresMergedBefore?,
   requiresBackfillComplete?, compatibleWithPreviousAppVersion,
   affectedRuntimes? }`.
-- `SchemaChangeEntry { file, kind, objectName?, operation?, additive,
-  description, rollback?, consumers?, policyEvidence?, expandContract? }`.
+- `SchemaChangeEntry { file, kind, objectName?, subObjectName?,
+  statementIndex?, operation?, additive, description, rollback?,
+  consumers?, policyEvidence?, expandContract? }` — **codex CRITICAL fix**:
+  added `subObjectName` (e.g. column name on a table) and `statementIndex`
+  to guarantee per-semantic-change uniqueness. Matching uses multiset
+  equality on `{file, kind, objectName, subObjectName, statementIndex?,
+  operation?}` — two identical statements still need two manifest entries.
 
 ### NEW — `src/core/schema-changes/detectors/sql.ts`
 
@@ -69,10 +77,16 @@ not a full semantic differ.
 
 ### NEW — `src/core/schema-changes/detectors/typescript.ts`
 
-Uses the TypeScript Compiler API (already a devDependency). For each file
-it parses both texts as `ts.SourceFile`, lists exported symbols by name,
-hashes each export's printed text. New name → `typescript.add_export`;
-removed → `typescript.remove_export`; changed hash → `typescript.change_signature`.
+Uses the TypeScript Compiler API. **Codex WARNING fix** — `typescript` is
+listed as `devDependency` in package.json today but cadence ships as an
+npm package; consumers `npm install`-ing cadence already install
+`typescript` transitively via `tsx`. We **lazy-import** `typescript` via
+`await import('typescript')` and on failure emit a single
+`unknown.unsupported_kind` entry per file (no hard runtime dependency
+added). For each file, parse both texts as `ts.SourceFile`, list exported
+symbols by name, hash each export's printed text. New name →
+`typescript.add_export`; removed → `typescript.remove_export`; changed
+hash → `typescript.change_signature`.
 
 ### NEW — `src/core/schema-changes/detectors/protobuf.ts`
 
@@ -95,17 +109,37 @@ extension / glob:
 Aggregator `detectAllChanges({ files: [{path, before, after}] })`
 returns `SchemaChangeEntry[]`.
 
+### NEW — `src/core/schema-changes/diff-provider.ts` (codex WARNING fix)
+
+Shared diff abstraction so the lifecycle path and the CLI scan use the
+same code:
+
+```typescript
+export interface DiffEntry { path: string; status: 'added' | 'deleted' | 'modified' | 'renamed'; beforeText?: string; afterText?: string; }
+export interface DiffProvider {
+  collectChangedFiles(opts: { baseRef: string; includeUntracked?: boolean }): Promise<DiffEntry[]>;
+}
+export function makeGitDiffProvider(repoRoot: string): DiffProvider;
+```
+
+Implementation shells `git diff --name-status <baseRef>` and
+`git show <baseRef>:<path>` for `before`; reads `afterText` from disk
+(or empty for deletes). Detectors handle `beforeText === undefined`
+(add) and `afterText === undefined` (delete) explicitly.
+
 ### NEW — `src/core/schema-changes/validator.ts`
 
 Pure functions, no IO:
 
-- `crossCheckManifest({ manifest, detected })` — for every detected
-  semantic change there must be a manifest entry on
-  `{file, kind, objectName, operation}`. Mismatch → list of issues.
+- `crossCheckManifest({ manifest, detected })` — **multiset** match on
+  `{file, kind, objectName, subObjectName, statementIndex?, operation?}`.
+  Two detected ADD COLUMN statements on the same table need two manifest
+  entries (codex CRITICAL fix). Mismatch → list of issues.
 - `reverseCheck({ manifest, detected })` — every manifest entry must
   match a detected change (or carry `additiveOverride` reason).
 - `enforcePolicy({ manifest, policy })` — `blockNotNullWithoutBackfill`,
-  `blockDropColumnWithoutDeprecation`, `blockRlsWeakeningWithoutSecurityReview`,
+  `blockDropColumnWithoutDeprecation`, `blockRlsWeakeningWithoutSecurityReview`
+  (requires `policyEvidence.securityReview.reviewer`),
   `destructiveRequiresExpandContract`, `pairedWithMustExist` (latter takes
   optional probe; pure logic when probe is absent).
 - Returns `{ ok, issues: Array<{ severity, code, message, entry? }> }`.
@@ -150,24 +184,51 @@ schemaChangePolicy?: {
 
 ### EDIT — `presets/schemas/profile.schema.json`
 
-Mirror the new fields. `schemaPaths` items are strings (globs). Defaults
-are all empty / off (so existing profiles see no change).
+Mirror the new fields. `schemaPaths` items are strings (globs).
+`schemaPaths` defaults to `[]` (opt-in gate). **Codex WARNING fix —
+defaults must agree with TypeScript**: once a profile sets a non-empty
+`schemaPaths`, the `schemaChangePolicy` boolean defaults are all `true`
+(safe by default). The JSON schema documents the per-field default; the
+TypeScript resolver applies the same default in code (JSON Schema
+draft-07 defaults are annotation-only).
 
 ### EDIT — `src/core/autopilot/run-lifecycle.ts`
 
-`endPhase('implement', output)`: when `output.schemaChanges` is non-empty
-or when any file in the diff matches `profile.schemaPaths`, run a
-cross-check + reverse-check helper. **The cross-check itself stays in
-`validator.ts` to keep the lifecycle file pure of detector dependencies.**
-Lifecycle owns the orchestration only. Throws `GuardrailError('invalid_config')`
-with code `incomplete_phase_output` (added below).
+`endPhase('implement', output)`: **codex CRITICAL fix** — gate ALL
+enforcement on `profile.schemaPaths.length > 0`. When the profile has not
+opted in, accept `output.schemaChanges` as-is (only basic shape validation
+via `validateImplement`). When opted in, lazy-import detector dispatch and
+run cross-check + reverse-check. Detectors require a diff provider; we
+inject one via dependency injection (`opts.diffProvider`) so tests can
+stub it. The lifecycle file stays free of detector imports.
 
-To avoid loading the SQL parser in tests that don't exercise it, the
-detector dispatch is lazy-imported only when the profile opts in.
+Throws `GuardrailError` with the new dedicated `incomplete_phase_output`
+code (not reusing `invalid_config`).
 
 ### EDIT — `src/core/errors.ts`
 
-Add `'incomplete_phase_output'` to `ErrorCode`. Default `retryable: false`.
+Add `'incomplete_phase_output'` and `'schema_policy_violation'` to
+`ErrorCode`. Default `retryable: false`. Policy violations get their own
+code so callers can distinguish "manifest doesn't cover the diff"
+(incomplete) from "manifest entries violate policy" (validate-phase block).
+
+### EDIT — `src/cli/validate.ts` (codex CRITICAL fix — wire policy enforcement)
+
+The validate-phase wrap loads the previously-persisted implement-phase
+`schemaChanges` from `runDir/artifacts/implement.json`, reads
+`profile.schemaChangePolicy`, runs `enforcePolicy()`, and emits an
+explicit block (non-zero exit + `GuardrailError('schema_policy_violation')`)
+on any blocker-severity issue. Gated on `profile.schemaPaths.length > 0`.
+
+### EDIT — PR body assembly (codex CRITICAL fix — wire template injection)
+
+Find the existing PR body builder (search for the PR template literal in
+`src/cli/pr.ts` or wherever the body is composed). After the body is
+assembled, call `injectIntoPrBody(body, schemaChanges)` so the
+`<!-- cadence:schema-changes -->` marker is replaced with the rendered
+table. The PR phase reads `schemaChanges` from the latest implement-phase
+artifact. If no manifest exists, the marker is stripped (leaving a clean
+PR body for opt-out users).
 
 ### EDIT — `src/cli/index.ts` (or wherever verbs register)
 
@@ -213,16 +274,21 @@ example shows users how to enable.
 ## Dependency additions
 
 ```
-"dependencies": {
-  "libpg_query": "^16.x"   // Postgres-native parser
-}
 "optionalDependencies": {
+  "libpg_query": "^17.x",   // Postgres-native parser — optional so cadence install stays cheap on machines without compilers
   "graphql": "^16.x",       // GraphQL schema diff
   "protobufjs": "^7.x"      // protobuf schema diff
 }
 ```
 
-(TypeScript compiler API is already in `devDependencies` via `typescript`.)
+All detectors lazy-import their parser and fall back to
+`unknown.unsupported_kind` when the package is absent. This keeps
+`npm install @delegance/cadence` light on non-opted-in users and avoids
+native-build failures on minimal images. **Codex NOTE fix** — the smoke
+test `tests/schema-changes/detectors-sql.test.ts` verifies `libpg_query`
+loads under Node 22 in the cadence test environment; downstream consumers
+(e.g. delegance-app on Alpine ECS) need to validate the same in their own
+Docker base image as part of opting in.
 
 ## Out of scope (deferred)
 
