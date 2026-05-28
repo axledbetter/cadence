@@ -34,6 +34,11 @@ jobs:
   release:
     name: Changesets release
     runs-on: ubuntu-latest
+    # Gated environment — npm trusted-publisher policy on npmjs.com binds
+    # the OIDC identity to this exact environment name. Until the trust
+    # policy is configured (see RELEASING.md), `npm publish` here will
+    # fail with the misleading `npm 404` that actually means auth-failed.
+    environment: npm-publish
     steps:
       # 1. Mint a GitHub App installation token BEFORE checkout so the
       #    repo's credential helper uses the app token (not the default
@@ -59,6 +64,18 @@ jobs:
           node-version: '22'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing requires npm CLI >= 11.5. Node 22's bundled
+      # npm may be older; pin explicitly so OIDC isn't silently skipped.
+      - name: Pin npm to a trusted-publishing-capable version
+        run: |
+          npm install -g npm@^11.5.0
+          NPM_MAJOR=$(node -e "console.log(process.versions.npm.split('.').map(Number)[0])")
+          if [ "$NPM_MAJOR" -lt 11 ]; then
+            echo "npm $(npm --version) is too old for trusted publishing (need >=11.5.0)"
+            exit 1
+          fi
+          npm --version
 
       # --ignore-scripts (codex WARNING fix #233): the credential
       # helper now carries an app-write token; we don't want random
@@ -101,8 +118,10 @@ jobs:
           # GITHUB_REPOSITORY is provided automatically by GitHub
           # Actions; the script reads it for the `gh release` --repo
           # flag.
-          # Until npm trusted publishing (track 1, PR #232) lands, we
-          # need an explicit NPM_TOKEN so the publish step doesn't
-          # half-succeed (tag pushed, npm publish silently auth-failed).
-          # Once #232 merges, delete this line.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          #
+          # NPM auth: trusted publishing (OIDC) — no NODE_AUTH_TOKEN.
+          # The `permissions.id-token: write` above + `environment:
+          # npm-publish` on this job let npm CLI exchange the GitHub
+          # OIDC token for an npm publish credential at the registry.
+          # Requires the trusted-publisher policy on npmjs.com — see
+          # RELEASING.md for the one-time setup.

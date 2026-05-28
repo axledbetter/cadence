@@ -3,7 +3,8 @@
   "version": "8.5.0",
   "type": "module",
   "publishConfig": {
-    "tag": "latest"
+    "tag": "latest",
+    "provenance": true
   },
   "description": "Cadence: the multi-model automated coding harness. Claude writes, Codex reviews, Cursor bugbot triages — role-split orchestration across 16+ providers (Anthropic, OpenAI, Google, Groq, Ollama, Bedrock, Azure, Cohere, Mistral, plus OpenAI-compatible). Risk-tiered review depth, concurrent multi-PR dispatch. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. MIT, local-first, distributed via Claude Code skill. (Formerly @delegance/claude-autopilot.)",
   "keywords": [

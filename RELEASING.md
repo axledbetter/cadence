@@ -120,14 +120,42 @@ Settings → Secrets and variables → Actions → New repository secret:
   file, including the `-----BEGIN RSA PRIVATE KEY-----` and
   `-----END RSA PRIVATE KEY-----` lines.
 
-### 3. (Temporary) NPM_TOKEN secret
+### 3. npm Trusted Publishing (OIDC) — replaces `NPM_TOKEN`
 
-Until [npm trusted publishing (track 1, PR
-#232)](https://github.com/axledbetter/cadence/pull/232) lands, the
-release workflow also reads `NPM_TOKEN` to authenticate `npm publish`.
-Add this as a repo secret (Automation-scoped token from npmjs.com).
-Once #232 merges, the OIDC flow takes over and you can delete the
-secret + the `NODE_AUTH_TOKEN` line in `release.yml`.
+The release workflow authenticates to npm via [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) — GitHub Actions' OIDC identity is verified directly by npm, no shared secret. You need to configure the trust policy once per package.
+
+#### 3a. Create the `npm-publish` GitHub environment
+
+1. cadence repo → **Settings** → **Environments** → **New environment**.
+2. Name: **`npm-publish`** (exact casing — npm's policy matches it literally).
+3. Optional: add `Required reviewers` later if you want a human gate on every publish. For now, leave protection rules empty.
+
+#### 3b. Configure the npm trusted-publisher policy
+
+1. npmjs.com → **@delegance/cadence** package page → **Settings** → **Trusted Publishers** → **Add**.
+2. Fields:
+   - Publisher: **GitHub Actions**
+   - Organization or user: **`axledbetter`**
+   - Repository: **`cadence`**
+   - Workflow filename: **`.github/workflows/release.yml`** (exact path, no leading slash)
+   - Environment name: **`npm-publish`** (must match step 3a casing)
+3. Save.
+
+#### 3c. First publish
+
+Cut a patch release through the normal changesets flow (or via the emergency manual path). The release workflow will publish via OIDC. Verify two ways:
+
+1. `npm view @delegance/cadence@<new-version> --json | jq '.dist'` — confirms publish succeeded.
+2. The package's npmjs.com page now shows a **Provenance** badge linking back to the cadence commit + workflow run.
+
+#### 3d. Decommission `NPM_TOKEN`
+
+After a successful OIDC publish, kill the long-lived token:
+
+1. cadence repo → Settings → Secrets and variables → Actions → delete `NPM_TOKEN` (repo secret, environment secrets, and check org-level secrets too).
+2. npmjs.com → your profile → Access Tokens → revoke any granular or classic tokens scoped to `@delegance/*`.
+
+You can now never accidentally rotate the wrong token, leak it in a log, or fail a publish because it expired.
 
 ## Troubleshooting
 
@@ -143,10 +171,9 @@ secret + the `NODE_AUTH_TOKEN` line in `release.yml`.
   revision".** The PR checkout didn't fetch master. Verify
   `fetch-depth: 0` is set and `git fetch origin master` ran.
 
-- **Publish step fails with "401 Unauthorized" on npm.** Either
-  `NPM_TOKEN` is missing/rotated, or trusted publishing OIDC config
-  on npmjs.com side doesn't match the workflow's `id-token: write` +
-  repo URL. Fix the token first; investigate OIDC second.
+- **Publish step fails with `npm error 404 PUT https://registry.npmjs.org/@delegance%2fcadence`.** This is npm's misleading way of saying **auth failed**. With OIDC, this means one of: the trusted-publisher policy isn't configured (or has a typo in owner / repo / workflow filename / environment); the `id-token: write` permission is missing from `release.yml`; the `environment: npm-publish` line is missing from the `release` job; or you haven't bumped the package version (npm returns 404 if you try to re-publish an existing version). Re-walk §3a–3b above against the actual workflow file.
+
+- **`npm too old for trusted publishing`.** The workflow pins npm to `^11.5.0`. If the pinned install itself fails (network blip, registry hiccup), the publish bails fast with a clear message. Re-run the workflow.
 
 - **Tag pushed but no GitHub Release.** The `gh release create` step
   in `release.yml` failed (check logs). Most common cause: `gh` not
