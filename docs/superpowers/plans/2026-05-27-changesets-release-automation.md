@@ -15,8 +15,8 @@ exemption, app-token for downstream CI, both packages installed).
 
 ## Worktree
 
-`feature/changesets-release-automation` on the cadence repo at
-`/Users/alexledbetter/work/claude-autopilot/.claude/worktrees/changesets`.
+`feature/changesets-release-automation` branch on the cadence repo,
+checked out as a git worktree under `.claude/worktrees/changesets/`.
 
 ## File-level changes
 
