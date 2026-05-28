@@ -24,9 +24,11 @@ New files in `src/core/protocol/`:
 
 1. `version.ts`
    - `export const PROTOCOL_VERSION = '1.0.0' as const;`
-   - `export const COMPONENT_VERSIONS = { profile, skillFrontmatter, state, phaseOutput, providerRegistry } as const` all at `'1.0.0'`.
+   - `export const COMPONENT_VERSIONS = { profile, skillFrontmatter, state, phaseOutput } as const` all at `'1.0.0'`. NOTE: `providerRegistry` is INTENTIONALLY excluded from the v1.0.0 baseline — no consumer is wired and no schema ships, so declaring it would tee up `schema_not_found` (codex CRITICAL fix). Add it when the first provider-registry consumer lands.
    - `ComponentKind` type union derived from the keys.
+   - `COMPONENT_META` map (codex CRITICAL fix — TypeScript camelCase keys vs hyphenated schema filenames): each component declares `{ kind, schemaName, currentVersion }`. Example: `skillFrontmatter` → `schemaName: 'skill-frontmatter'`. The loader uses `meta.schemaName` (NOT `kind`) when looking up `presets/schemas/${schemaName}-${version}.json`.
    - Helper `getComponentVersion(kind: ComponentKind): string`.
+   - Helper `getComponentMeta(kind: ComponentKind): ComponentMeta`.
 
 2. `semver.ts`
    - `normalize(v: string): string` — accepts `'1'`, `'1.2'`, `'1.2.0'`, returns full triplet. Rejects malformed input with `ProtocolError`.
@@ -40,11 +42,12 @@ New files in `src/core/protocol/`:
 ### Block 2 — Compat + migration contract
 
 4. `compat.ts`
-   - `satisfies(declared: string, supported: string): SatisfiesResult` — 5-state enum: `'exact' | 'older-supported' | 'older-needs-migration' | 'newer-unsupported' | 'major-incompatible'`. Inputs normalized first.
+   - `satisfies(declared: string, supported: string, opts?: { registry?: MigrationRegistry, component?: ComponentKind }): SatisfiesResult` — 5-state enum: `'exact' | 'older-supported' | 'older-needs-migration' | 'newer-unsupported' | 'major-incompatible'`. Inputs normalized first.
+   - **Classification rule (codex WARNING fix)**: same-major older versions default to `'older-supported'` UNLESS a migration edge exists for that component spanning the gap, in which case the classification flips to `'older-needs-migration'`. This means the migration registry IS the source of truth for "is an adapter required?" — adding a migration in a future PR automatically flips classification without code change. Different major → `'major-incompatible'`. Declared > supported same-major → `'newer-unsupported'`. Equal → `'exact'`.
    - `Migration<TFrom, TTo>` interface per spec (apply returns `{value, warnings}`).
    - `MigrationRegistry` — per-component map from `${from}->${to}` → Migration.
-   - `findMigrationChain(component, from, to)` — BFS over registered migrations; returns ordered list or throws `migration_not_found`.
-   - `migrate(input, fromVersion, toVersion, component)` — pipes input through the chain; aggregates warnings. Pure, deterministic.
+   - `findMigrationChain(component, from, to)` — BFS over registered migrations; returns ordered list or throws `migration_not_found`. When `from === to`, returns empty array (no-op).
+   - `migrate(input, fromVersion, toVersion, component)` — pipes input through the chain; aggregates warnings. Pure, deterministic. When `from === to`, returns input unchanged with zero warnings (codex CRITICAL fix — defensive no-op).
 
 5. `migrations/index.ts`
    - Hand-curated registry export. Empty for each component at 1.0.0 baseline.
@@ -78,24 +81,36 @@ New files in `src/core/protocol/`:
    `totalCostUSD`, `lastEventSeq`, `writerId`, `cwd`. `additionalProperties: true`
    for forward-compat.
 
-9. `presets/schemas/phase-output-implement-1.0.0.json` — generic phase-output
-   envelope: `protocol_version` (optional, default `'1.0.0'`), `phase` (string),
-   `status` (`succeeded`|`failed`|`skipped`), `artifacts[]` array, free-form
+9. `presets/schemas/phase-output-1.0.0.json` — generic phase-output
+   envelope (codex WARNING fix — name no longer implies per-phase variants;
+   the v1.0.0 baseline ships a single generic schema, future protocol bumps
+   can split into `phase-output-implement-2.0.0.json` etc. via the
+   `COMPONENT_META.schemaName` indirection): `protocol_version` (optional,
+   default `'1.0.0'`), `phase` (string), `status`
+   (`succeeded`|`failed`|`skipped`), `artifacts[]` array, free-form
    `meta` object. `additionalProperties: true`.
 
 ### Block 4 — Generic 3-stage loader
 
 10. `loader.ts`
-    - `createProtocolLoader<TIn, TOut>({ component, normalizers })` factory:
+    - `createProtocolLoader<TIn, TOut>({ component, schemaRegistry?, migrationRegistry?, currentVersion? })` factory (codex WARNING fix — accepts injected registries for tests):
       - Stage 1: `validateAgainstDeclaredSchema` — looks up
-        `presets/schemas/${component}-${declaredVersion}.json` and runs Ajv.
-      - Stage 2: `migrate(raw, declared, current, component)` from compat.ts.
+        `${meta.schemaName}-${declaredVersion}.json` via `schemaRegistry`
+        (default: filesystem-backed registry over `presets/schemas/`) and
+        runs Ajv. Schemas not found → `ProtocolError(schema_not_found)`.
+      - Branch on `satisfies(declared, current, { registry, component })`:
+        - `exact` → skip migration, run Stage 3 only.
+        - `older-supported` → skip migration, run Stage 3 (additive defaults filled by Ajv `useDefaults`).
+        - `older-needs-migration` → run Stage 2 `migrate()` then Stage 3.
+        - `newer-unsupported` → throw `ProtocolError(newer_unsupported)` BEFORE schema lookup or migration (codex CRITICAL fix).
+        - `major-incompatible` → throw `ProtocolError(major_incompatible)` BEFORE schema lookup or migration. If a bridge migration is registered (`<from-major>.x.x-to-<to-major>.0.0`), include hint in error message.
+      - Stage 2 (conditional): `migrate(raw, declared, current, component)` from compat.ts. Safe no-op when `from === to`.
       - Stage 3: `validateAgainstCurrentSchema` — looks up
-        `presets/schemas/${component}-${CURRENT}.json` and runs Ajv.
+        `${meta.schemaName}-${currentVersion}.json` and runs Ajv. On failure → `ProtocolError(validation_failed)`.
     - Returns `{ value: TOut, warnings: string[], declaredVersion, currentVersion, migrated: boolean }`.
-    - Ajv compile cache keyed by `${component}-${version}`.
-    - Loader factory throws `ProtocolError(newer_unsupported)` /
-      `ProtocolError(major_incompatible)` per the satisfies() branch table.
+    - **Ajv configuration (codex WARNING fix)**: `{ useDefaults: true, allErrors: true, strict: false }`. Input is structured-cloned BEFORE validation/migration so caller's object isn't mutated; `result.value` is the cloned canonical DTO.
+    - Ajv compile cache keyed by `${schemaName}-${version}`.
+    - `normalizers` removed from initial implementation (codex NOTE — replaced by Ajv `useDefaults` for protocol_version defaulting; adding it back is a follow-up if any consumer needs richer pre-validate transformation).
 
 ### Block 5 — Changelog
 
@@ -113,12 +128,10 @@ New files in `src/core/protocol/`:
     - After `parsed = yaml.load(raw)` and BEFORE the existing Ajv validate
       step, call the protocol loader:
       ```
-      const declared = (parsed as any).protocol_version ?? '1.0.0';
       const result = profileProtocolLoader.load(parsed);
       parsed = result.value;
       ```
-    - Then continue with the existing schema validation against
-      `profile.schema.json` (which becomes the strict current-shape check).
+    - Add `protocol_version` to **the existing** `presets/schemas/profile.schema.json` as optional with semver pattern (codex WARNING fix — otherwise the legacy Ajv validation rejects the protocol_version field the loader just defaulted in via `useDefaults`). The legacy schema stays as the single source of truth for the current-shape profile; the `presets/schemas/profile-1.0.0.json` is a deliberate copy used by the protocol loader's stage-1/3 validation. CI changelog gate covers both.
     - Add `protocol_version` to `ProfileConfig` type as optional (defaults
       filled by loader).
 
@@ -141,8 +154,7 @@ New files in `src/core/protocol/`:
 15. New file `src/cli/protocol.ts`:
     - `runProtocolPrint()` — prints `PROTOCOL_VERSION` + component-version map.
       Backs the `cadence --protocol` flag.
-    - `runProtocolChangelog([--since=X.Y.Z])` — reads
-      `src/core/protocol/changelog.md`, filters by since, prints.
+    - `runProtocolChangelog([--since=X.Y.Z])` — reads the changelog via a stable bundled-asset path (codex NOTE fix): resolves to `<packageRoot>/src/core/protocol/changelog.md` using `findPackageRoot()` so it works both in source checkouts AND in npm-installed copies (the npm package ships `src/` per existing convention — verified via `package.json` "files"). Filters by `--since`, prints.
     - `runProtocolCommand(args)` — dispatcher with sub-verbs:
       `changelog`, `--help`.
 
@@ -196,12 +208,16 @@ All under `tests/protocol/`:
     - input-validates-against-from-schema enforced by harness
 
 22. `tests/protocol/loader-handshake.test.ts` — 3-stage pipeline tests using
-    a synthetic component:
+    a synthetic component injected via the loader's `schemaRegistry` and
+    `migrationRegistry` constructor options (codex WARNING fix — production
+    `ComponentKind` union doesn't include the test component, but the
+    injected registry overrides take precedence):
     - exact-version load (no migration)
     - older-supported (additive normalization succeeds)
     - older-needs-migration (synthetic adapter applied; post-validate passes)
-    - newer-unsupported (loader throws `ProtocolError(newer_unsupported)`)
-    - major-incompatible (throws `ProtocolError(major_incompatible)`)
+    - newer-unsupported (loader throws `ProtocolError(newer_unsupported)` BEFORE any schema/migration lookup)
+    - major-incompatible (throws `ProtocolError(major_incompatible)` BEFORE schema/migration lookup)
+    - structured-clone behavior — input object NOT mutated by Ajv `useDefaults`
 
 23. `tests/protocol/cli.test.ts` — spawn-or-direct-call tests for
     `--protocol`, `protocol changelog`, `profile upgrade --dry-run`. Use a
