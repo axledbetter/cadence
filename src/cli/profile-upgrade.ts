@@ -239,9 +239,18 @@ export function runProfileUpgrade(opts: ProfileUpgradeOptions): ProfileUpgradeRe
       `\x1b[33m[cadence] profile upgrade: source file contains YAML comments; --write will strip them.\x1b[0m\n`,
     );
   }
+  // Codex WARNING fix — destructive rewrite safety: drop a .bak file
+  // before overwriting so users can recover if the canonical form
+  // breaks something they care about (key ordering, scalar quoting,
+  // anchors). Path is printed so the recovery is one cp away.
+  const backupPath = `${filePath}.bak`;
+  fs.copyFileSync(filePath, backupPath);
   fs.writeFileSync(filePath, canonicalYaml, 'utf8');
   process.stdout.write(
     `[cadence] profile upgrade: wrote canonical ${result.currentVersion} shape to ${filePath}\n`,
+  );
+  process.stdout.write(
+    `[cadence] profile upgrade: backup of pre-upgrade file saved to ${backupPath}\n`,
   );
   if (result.warnings.length > 0) {
     process.stdout.write(`migration warnings:\n`);

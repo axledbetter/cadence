@@ -93,6 +93,7 @@
     "prepublishOnly": "npm run audit:supabase && npm run build && npm test",
     "audit:supabase": "tsx scripts/audit-supabase-imports.ts",
     "audit:frontend": "tsx scripts/audit-frontend.ts",
+    "protocol:changelog-check": "tsx scripts/protocol-changelog-check.ts",
     "db:start": "bash scripts/db/start-supabase.sh",
     "db:stop": "bash scripts/db/stop-supabase.sh",
     "db:reset": "bash scripts/db/reset-supabase.sh"
