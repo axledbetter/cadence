@@ -27,11 +27,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           # Need full history so `git fetch origin master` can resolve
-          # the base ref for `npx changeset status --since=origin/master`.
+          # the base ref for the gating check below.
           fetch-depth: 0
 
       # PR checkouts don't always have origin/master cached — fetch it
-      # explicitly so `changeset status --since` works.
+      # explicitly.
       - name: Fetch base ref
         run: git fetch origin master:refs/remotes/origin/master
 
@@ -56,18 +56,25 @@ jobs:
             **/*.test.ts
             docs/**
 
-      - uses: actions/setup-node@v6
-        if: steps.changed.outputs.any_changed == 'true'
-        with:
-          node-version: '22'
-          cache: npm
-
-      # `npm ci` installs the locally pinned @changesets/cli so the
-      # check uses the same version as the release workflow (rather
-      # than whatever npx downloads).
-      - run: npm ci
-        if: steps.changed.outputs.any_changed == 'true'
-
+      # Custom gate: count new `.changeset/*.md` files in the PR diff
+      # (excluding README.md / config.json). `npx changeset status`
+      # exits 0 even when there are no changesets — it's informational
+      # only — so we implement the gate ourselves.
       - name: Verify changeset present
         if: steps.changed.outputs.any_changed == 'true'
-        run: npx changeset status --since=origin/master
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          ADDED=$(git diff --name-only --diff-filter=A "${BASE_SHA}".."${HEAD_SHA}" \
+            | grep '^\.changeset/' \
+            | grep -v '^\.changeset/README\.md$' \
+            | grep -v '^\.changeset/config\.json$' \
+            || true)
+          if [ -z "${ADDED}" ]; then
+            echo "::error::No .changeset/*.md file in this PR. Run \`npx changeset\` and commit the result. See RELEASING.md."
+            exit 1
+          fi
+          echo "Found changeset file(s):"
+          echo "${ADDED}"
