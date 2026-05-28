@@ -1,10 +1,10 @@
 import type { Finding } from '../core/findings/types.ts';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import { appendCostLog } from '../core/persist/cost-log.ts';
-import { injectIntoPrBody } from '../core/schema-changes/pr-template.ts';
-import { validateSchemaChanges } from '../core/schema-changes/types.ts';
+import { injectIntoPrBody, SCHEMA_CHANGES_MARKER } from '../core/schema-changes/pr-template.ts';
+import { validateSchemaChanges, type SchemaChangeEntry } from '../core/schema-changes/types.ts';
+import { findLatestImplementArtifact } from '../core/schema-changes/artifact-resolver.ts';
 
 export interface PrDescOptions {
   base?: string;
@@ -264,30 +264,35 @@ async function createPr(title: string, body: string, yes: boolean): Promise<PrDe
 // ---------------------------------------------------------------------------
 
 /**
- * If `.claude/autopilot/runs/<latest>/artifacts/implement.json` exists with a
- * `schemaChanges` array, render it into the PR body via
- * `injectIntoPrBody()`. No-op if absent (back-compat). Errors are swallowed
- * so PR body rendering never blocks on a stale artifact.
+ * Reads the latest implement-phase artifact (via shared
+ * `findLatestImplementArtifact()` — same resolver `validate` uses, codex
+ * CRITICAL fix) and renders `schemaChanges` into the PR body via
+ * `injectIntoPrBody()`.
+ *
+ * Codex WARNING fix — behavior contract:
+ *   1. No artifact AND body has no marker → return body unchanged (back-compat).
+ *   2. No artifact AND body HAS marker → replace marker with empty manifest block.
+ *   3. Artifact has no `schemaChanges` → same as (1)/(2).
+ *   4. Artifact has invalid `schemaChanges` → strip marker (don't let bad data leak into PR).
+ *   5. Artifact has valid `schemaChanges` → render table.
  */
 function injectSchemaChangesIfPresent(body: string, cwd: string): string {
+  const hasMarker = body.includes(SCHEMA_CHANGES_MARKER);
+  let entries: SchemaChangeEntry[] | null = null;
   try {
-    const runsDir = path.join(cwd, ".claude", "autopilot", "runs");
-    if (!fs.existsSync(runsDir)) return body;
-    const entries = fs.readdirSync(runsDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => ({ name: d.name, mtime: fs.statSync(path.join(runsDir, d.name)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    for (const { name } of entries) {
-      const artifact = path.join(runsDir, name, "artifacts", "implement.json");
-      if (!fs.existsSync(artifact)) continue;
-      const raw = JSON.parse(fs.readFileSync(artifact, "utf8")) as { schemaChanges?: unknown };
-      if (!raw.schemaChanges) return body;
-      const v = validateSchemaChanges(raw.schemaChanges);
-      if (!v.ok) return body;
-      return injectIntoPrBody(body, v.value);
+    const artifact = findLatestImplementArtifact(cwd);
+    if (artifact) {
+      const raw = JSON.parse(fs.readFileSync(artifact.artifactPath, 'utf8')) as { schemaChanges?: unknown };
+      if (raw.schemaChanges) {
+        const v = validateSchemaChanges(raw.schemaChanges);
+        if (v.ok) entries = v.value;
+      }
     }
   } catch {
-    // best-effort
+    // Continue with entries === null (renders an empty manifest if marker present).
   }
-  return body;
+  if (entries === null) {
+    return hasMarker ? injectIntoPrBody(body, []) : body;
+  }
+  return injectIntoPrBody(body, entries);
 }

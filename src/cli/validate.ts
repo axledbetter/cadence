@@ -5,8 +5,8 @@ import type { GuardrailConfig } from '../core/config/types.ts';
 import { type RunPhase } from '../core/run-state/phase-runner.ts';
 import { runPhaseWithLifecycle } from '../core/run-state/run-phase-with-lifecycle.ts';
 import { runSchemaPolicyCheck } from '../core/schema-changes/policy-runner.ts';
+import { findLatestImplementArtifact } from '../core/schema-changes/artifact-resolver.ts';
 import { resolveProfile } from '../core/profile/resolver.ts';
-import { GuardrailError } from '../core/errors.ts';
 
 const C = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -136,73 +136,75 @@ export async function runValidate(options: ValidateCommandOptions = {}): Promise
     return 1;
   }
 
-  // v8.6 — enforce schema-change policy on the most recent implement
-  // artifact when the profile opts in. Best-effort: errors are surfaced
-  // but never crash the verb; the verdict is appended to the validate log.
-  try {
-    const policyResult = await enforceSchemaChangePolicyForCwd(cwd);
-    if (!policyResult.ok) {
-      const lines = ['', '## Schema-change policy violations', ''];
-      for (const issue of policyResult.issues) {
-        lines.push(`- [${issue.severity}] ${issue.code}: ${issue.message}`);
-      }
-      fs.appendFileSync(output.validateLogPath, lines.join('\n') + '\n', 'utf8');
-      // Print to stderr too.
-      for (const line of lines) process.stderr.write(line + '\n');
-      // Throw a typed error so the caller's exit code reflects the block.
-      throw new GuardrailError(
-        `schema-change policy violations (${policyResult.issues.length})`,
-        { code: 'schema_policy_violation', provider: 'validate', details: { issues: policyResult.issues } },
-      );
+  // v8.6 — enforce schema-change policy on the latest implement artifact
+  // when the profile opts in. Fail-CLOSED semantics (codex CRITICAL fix):
+  // once `schemaPaths` is non-empty, malformed/unreadable artifacts or
+  // resolver errors block the validate, not pass it.
+  const policyOutcome = await enforceSchemaChangePolicyForCwd(cwd);
+  if (policyOutcome.kind === 'block') {
+    const lines = ['', '## Schema-change policy violations', ''];
+    for (const issue of policyOutcome.issues) {
+      lines.push(`- [${issue.severity}] ${issue.code}: ${issue.message}`);
     }
-  } catch (err) {
-    if (err instanceof GuardrailError && err.code === 'schema_policy_violation') {
-      return 1;
-    }
-    // Non-blocking failures from the policy check itself — log and continue.
-    process.stderr.write(`[validate] schema policy check skipped: ${(err as Error).message}\n`);
+    fs.appendFileSync(output.validateLogPath, lines.join('\n') + '\n', 'utf8');
+    for (const line of lines) process.stderr.write(line + '\n');
+    return 1;
+  }
+  if (policyOutcome.kind === 'error') {
+    process.stderr.write(`[validate] schema policy check FAILED CLOSED: ${policyOutcome.message}\n`);
+    fs.appendFileSync(output.validateLogPath, `\n## Schema-change policy error\n\n${policyOutcome.message}\n`, 'utf8');
+    return 1;
   }
 
   return renderValidateOutput(output, validateInput);
 }
 
+type PolicyOutcome =
+  | { kind: 'skip' }
+  | { kind: 'ok' }
+  | { kind: 'block'; issues: Awaited<ReturnType<typeof runSchemaPolicyCheck>>['issues'] }
+  | { kind: 'error'; message: string };
+
 /**
- * v8.6 — read the latest implement artifact + the resolved profile, then
- * run enforcePolicy. Returns `{ ok: true, issues: [] }` when no profile,
- * no opt-in, or no artifact. Errors thrown by the resolver are swallowed
- * to keep validate non-blocking on profile-resolution edge cases.
+ * v8.6 — fail-closed policy enforcement. Returns:
+ *   - `{ kind: 'skip' }`     when profile has no `schemaPaths` (opt-in gate)
+ *   - `{ kind: 'ok' }`       when manifest passed policy
+ *   - `{ kind: 'block' }`    when manifest violated policy
+ *   - `{ kind: 'error' }`    when resolver / artifact read / runner threw
+ *                            and profile opted in — fail-closed
  */
-async function enforceSchemaChangePolicyForCwd(cwd: string): Promise<{ ok: boolean; issues: Awaited<ReturnType<typeof runSchemaPolicyCheck>>['issues'] }> {
-  let schemaPaths: string[] = [];
+async function enforceSchemaChangePolicyForCwd(cwd: string): Promise<PolicyOutcome> {
+  // Resolve profile first. If it errors, we treat as "skip" because
+  // there's nothing to opt-in to — the profile resolver itself surfaces
+  // its own errors at startup, so a silent skip here matches existing
+  // behavior for cadence verbs that don't load profiles.
+  let schemaPaths: string[];
   let policy: import('../core/profile/types.ts').SchemaChangePolicy | undefined;
   try {
     const resolved = await resolveProfile({ cwd });
     schemaPaths = resolved.config.schemaPaths ?? [];
     policy = resolved.config.schemaChangePolicy;
   } catch {
-    return { ok: true, issues: [] };
+    return { kind: 'skip' };
   }
-  if (schemaPaths.length === 0) return { ok: true, issues: [] };
-  const runDir = findLatestRunDir(cwd);
-  if (!runDir) return { ok: true, issues: [] };
-  const opts: Parameters<typeof runSchemaPolicyCheck>[0] = { runDir };
-  if (policy) opts.policy = policy;
-  const r = await runSchemaPolicyCheck(opts);
-  return { ok: r.ok, issues: r.issues };
-}
+  if (schemaPaths.length === 0) return { kind: 'skip' };
 
-function findLatestRunDir(cwd: string): string | null {
-  const runsRoot = path.join(cwd, '.claude', 'autopilot', 'runs');
-  if (!fs.existsSync(runsRoot)) return null;
+  // Profile IS opted in. From here on we fail closed.
+  const artifact = findLatestImplementArtifact(cwd);
+  if (!artifact) {
+    return {
+      kind: 'error',
+      message: 'profile.schemaPaths is non-empty but no implement-phase artifact was found in .claude/autopilot/runs/*/artifacts/implement.json. Run the implement phase before validate, or unset schemaPaths to opt out.',
+    };
+  }
   try {
-    const entries = fs.readdirSync(runsRoot, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => ({ name: d.name, mtime: fs.statSync(path.join(runsRoot, d.name)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    if (entries.length === 0) return null;
-    return path.join(runsRoot, entries[0]!.name);
-  } catch {
-    return null;
+    const opts: Parameters<typeof runSchemaPolicyCheck>[0] = { runDir: artifact.runDir };
+    if (policy) opts.policy = policy;
+    const r = await runSchemaPolicyCheck(opts);
+    if (!r.ok) return { kind: 'block', issues: r.issues };
+    return { kind: 'ok' };
+  } catch (err) {
+    return { kind: 'error', message: (err as Error).message };
   }
 }
 
