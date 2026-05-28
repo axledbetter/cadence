@@ -1,6 +1,6 @@
 {
   "name": "@delegance/cadence",
-  "version": "8.6.0",
+  "version": "8.5.0",
   "type": "module",
   "publishConfig": {
     "tag": "latest"
