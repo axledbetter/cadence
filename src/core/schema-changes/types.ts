@@ -32,6 +32,8 @@ export type SchemaChangeKind =
   | 'sql.add_policy'          | 'sql.alter_policy'       | 'sql.drop_policy'
   | 'sql.grant'               | 'sql.revoke'
   | 'sql.create_role'         | 'sql.alter_role'         | 'sql.drop_role'
+  // SQL — types (enums + composites — distinct from functions)
+  | 'sql.create_type'         | 'sql.alter_type'         | 'sql.drop_type'
   // SQL — data
   | 'sql.data_backfill'       | 'sql.data_delete'        | 'sql.truncate'
   // GraphQL
@@ -59,6 +61,7 @@ export const SCHEMA_CHANGE_KINDS: readonly SchemaChangeKind[] = [
   'sql.add_policy','sql.alter_policy','sql.drop_policy',
   'sql.grant','sql.revoke',
   'sql.create_role','sql.alter_role','sql.drop_role',
+  'sql.create_type','sql.alter_type','sql.drop_type',
   'sql.data_backfill','sql.data_delete','sql.truncate',
   'graphql.add_field','graphql.remove_field','graphql.add_enum_value',
   'graphql.remove_enum_value','graphql.deprecate_field',
@@ -77,6 +80,7 @@ export function isSchemaChangeKind(s: unknown): s is SchemaChangeKind {
 export const DESTRUCTIVE_KINDS: ReadonlySet<SchemaChangeKind> = new Set<SchemaChangeKind>([
   'sql.drop_table','sql.drop_column','sql.drop_index',
   'sql.drop_view','sql.drop_function','sql.drop_trigger','sql.drop_extension',
+  'sql.drop_type',
   'sql.disable_rls','sql.drop_policy','sql.revoke','sql.drop_role',
   'sql.data_delete','sql.truncate',
   'graphql.remove_field','graphql.remove_enum_value',

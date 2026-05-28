@@ -46,12 +46,13 @@ export async function runSchemaPolicyCheck(opts: PolicyRunnerOpts): Promise<Poli
   if (!schemaChanges) return { ok: true, issues: [], manifestPath: artifactPath };
   const v = validateSchemaChanges(schemaChanges);
   if (!v.ok) {
-    // Treat shape failure as a block — the agent shipped an invalid
-    // manifest.
+    // Bugbot MEDIUM fix — dedicated `manifest_shape_invalid` code so
+    // monitoring/alerting can distinguish "agent shipped malformed
+    // manifest" from "destructive change lacks expand-contract".
     return {
       ok: false,
       manifestPath: artifactPath,
-      issues: [{ severity: 'block', code: 'destructive_without_expand_contract', message: `schemaChanges shape invalid: ${v.error}`, entry: { file: '?', kind: 'unknown.unparseable', additive: false, description: v.error } }],
+      issues: [{ severity: 'block', code: 'manifest_shape_invalid', message: `schemaChanges shape invalid: ${v.error}`, entry: { file: '?', kind: 'unknown.unparseable', additive: false, description: v.error } }],
     };
   }
   const policyOpts: Parameters<typeof enforcePolicy>[0] = { manifest: v.value };

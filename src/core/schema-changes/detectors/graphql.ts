@@ -199,7 +199,9 @@ export async function detectGraphqlChanges(input: DetectInput): Promise<SchemaCh
       }
     }
   }
-  // Removed types (treat as remove_field of all fields).
+  // Removed types — emit remove entries for BOTH fields and enum values
+  // (bugbot LOW fix — previous version only handled fields, missing
+  // remove_enum_value entries when an entire enum type was removed).
   for (const [typeName, before] of beforeTypes) {
     if (afterTypes.has(typeName)) continue;
     for (const [fname] of before.fields) {
@@ -211,6 +213,17 @@ export async function detectGraphqlChanges(input: DetectInput): Promise<SchemaCh
         statementIndex: statementIndex++,
         additive: false,
         description: `Remove field ${typeName}.${fname} (type ${typeName} removed)`,
+      });
+    }
+    for (const v of before.enumValues) {
+      entries.push({
+        file: input.file,
+        kind: 'graphql.remove_enum_value',
+        objectName: typeName,
+        subObjectName: v,
+        statementIndex: statementIndex++,
+        additive: false,
+        description: `Remove enum value ${typeName}.${v} (type ${typeName} removed)`,
       });
     }
   }

@@ -232,6 +232,9 @@ function mapDropStmt(d: DropStmt): MappedEntry[] {
       case 'OBJECT_EXTENSION':
         out.push({ kind: 'sql.drop_extension', objectName: name, additive: false, description: `DROP EXTENSION ${name ?? '(unknown)'}` });
         break;
+      case 'OBJECT_TYPE':
+        out.push({ kind: 'sql.drop_type', objectName: name, additive: false, description: `DROP TYPE ${name ?? '(unknown)'}` });
+        break;
       case 'OBJECT_POLICY': {
         const items = readListItems(obj);
         const pol = items.length >= 2 ? items[1] : (name ?? '(unknown)');
@@ -394,14 +397,17 @@ function mapStatement(stmt: Record<string, unknown>): MappedEntry[] {
         : [{ kind: 'sql.truncate' as const, additive: false, description: 'TRUNCATE' }];
     }
     case 'CreateEnumStmt': {
+      // Codex/bugbot MEDIUM fix — enums are SQL.create_type, NOT
+      // sql.create_function. Distinct kind so multiset matching can't
+      // confuse a CREATE FUNCTION and CREATE TYPE that share a name.
       const e = s as { typeName?: Array<{ String?: { sval?: string } }> };
       const name = (e.typeName ?? []).map(readString).filter(Boolean).join('.');
-      return [{ kind: 'sql.create_function', objectName: name, operation: 'enum', additive: true, description: `CREATE TYPE ${name} AS ENUM` }];
+      return [{ kind: 'sql.create_type', objectName: name, operation: 'enum', additive: true, description: `CREATE TYPE ${name} AS ENUM` }];
     }
     case 'AlterEnumStmt': {
       const e = s as { typeName?: Array<{ String?: { sval?: string } }>; newVal?: string };
       const name = (e.typeName ?? []).map(readString).filter(Boolean).join('.');
-      return [{ kind: 'sql.alter_function', objectName: name, subObjectName: e.newVal, operation: 'add enum value', additive: true, description: `ALTER TYPE ${name} ADD VALUE ${e.newVal ?? ''}` }];
+      return [{ kind: 'sql.alter_type', objectName: name, subObjectName: e.newVal, operation: 'add enum value', additive: true, description: `ALTER TYPE ${name} ADD VALUE ${e.newVal ?? ''}` }];
     }
     default:
       // SelectStmt, DoStmt, comments, etc. — not schema changes.
@@ -461,12 +467,14 @@ export async function detectSqlChanges(input: DetectInput): Promise<SchemaChange
     }
   }
 
-  // Use a string-canonicalized statement key to detect which statements
-  // are NEW in afterParsed. We canonicalize via JSON.stringify of the
-  // parsed AST (libpg-query gives stable key order).
-  const beforeKeys = new Set<string>();
+  // Bugbot MEDIUM fix — use a multiset (Map<key, count>) NOT a Set, so
+  // adding a Nth+1 copy of an already-present statement is correctly
+  // detected as a change. Two identical CREATE INDEX statements in
+  // before-text vs three in after-text → one new change.
+  const beforeCounts = new Map<string, number>();
   for (const s of beforeParsed.stmts) {
-    beforeKeys.add(JSON.stringify(s.stmt));
+    const key = JSON.stringify(s.stmt);
+    beforeCounts.set(key, (beforeCounts.get(key) ?? 0) + 1);
   }
 
   const entries: SchemaChangeEntry[] = [];
@@ -474,7 +482,11 @@ export async function detectSqlChanges(input: DetectInput): Promise<SchemaChange
     const s = afterParsed.stmts[i];
     if (!s) continue;
     const key = JSON.stringify(s.stmt);
-    if (beforeKeys.has(key)) continue;
+    const remaining = beforeCounts.get(key) ?? 0;
+    if (remaining > 0) {
+      beforeCounts.set(key, remaining - 1);
+      continue;
+    }
     const mapped = mapStatement(s.stmt);
     for (const m of mapped) {
       entries.push({

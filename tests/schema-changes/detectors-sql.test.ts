@@ -246,22 +246,46 @@ describe('SQL detector — multi-statement granularity (codex CRITICAL)', () => 
 });
 
 describe('SQL detector — generated columns and enum changes', () => {
-  it('CREATE TYPE ... AS ENUM → entry', async () => {
+  it('CREATE TYPE ... AS ENUM → sql.create_type (bugbot fix — not sql.create_function)', async () => {
     const r = await detect("CREATE TYPE color AS ENUM ('red','blue');");
     assert.ok(r.length >= 1);
+    assert.equal(r[0]!.kind, 'sql.create_type');
     assert.match(r[0]!.description, /CREATE TYPE/);
   });
 
-  it('ALTER TYPE ... ADD VALUE → entry', async () => {
+  it('ALTER TYPE ... ADD VALUE → sql.alter_type (bugbot fix)', async () => {
     const r = await detect("ALTER TYPE color ADD VALUE 'green';");
     assert.ok(r.length >= 1);
+    assert.equal(r[0]!.kind, 'sql.alter_type');
     assert.equal(r[0]!.subObjectName, 'green');
     assert.equal(r[0]!.additive, true);
+  });
+
+  it('DROP TYPE → sql.drop_type', async () => {
+    const r = await detect('DROP TYPE color;');
+    assert.equal(r[0]!.kind, 'sql.drop_type');
+    assert.equal(r[0]!.additive, false);
   });
 
   it('GENERATED column in CREATE TABLE — parsed as CreateStmt without crashing', async () => {
     const r = await detect("CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a + 1) STORED);");
     assert.equal(r[0]!.kind, 'sql.create_table');
+  });
+});
+
+describe('SQL detector — multiset before-text bug (bugbot fix)', () => {
+  it('before has N copies, after has N+1 → emits exactly one new change', async () => {
+    const before = 'CREATE INDEX foo ON t(a); CREATE INDEX foo ON t(a);';
+    const after = 'CREATE INDEX foo ON t(a); CREATE INDEX foo ON t(a); CREATE INDEX foo ON t(a);';
+    const r = await detectSqlChanges({ file: FILE, beforeText: before, afterText: after });
+    assert.equal(r.length, 1);
+  });
+
+  it('before has 3 copies, after has 1 → emits zero new changes (Set bug regression)', async () => {
+    const before = 'CREATE INDEX foo ON t(a); CREATE INDEX foo ON t(a); CREATE INDEX foo ON t(a);';
+    const after = 'CREATE INDEX foo ON t(a);';
+    const r = await detectSqlChanges({ file: FILE, beforeText: before, afterText: after });
+    assert.equal(r.length, 0);
   });
 });
 

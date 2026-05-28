@@ -84,4 +84,13 @@ describe('policy-runner — validates by reading implement artifact', () => {
     });
     assert.equal(r.ok, true);
   });
+
+  it('invalid manifest shape → manifest_shape_invalid code (bugbot fix)', async () => {
+    const runDir = tmpRunDir();
+    // Missing required `kind` field.
+    writeArtifact(runDir, [{ file: 'a.sql', additive: true, description: 'x' }]);
+    const r = await runSchemaPolicyCheck({ runDir });
+    assert.equal(r.ok, false);
+    assert.ok(r.issues.some((i) => i.code === 'manifest_shape_invalid'));
+  });
 });

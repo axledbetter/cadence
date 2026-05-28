@@ -70,4 +70,13 @@ describe('GraphQL detector', () => {
     const r = await detectGraphqlChanges({ file: FILE, beforeText: '', afterText: 'this is not graphql' });
     assert.equal(r[0]!.kind, 'unknown.unparseable');
   });
+
+  it('removed enum type emits remove_enum_value entries (bugbot fix)', async () => {
+    const before = `enum Color { RED BLUE GREEN }\ntype User { id: ID! }`;
+    const after = `type User { id: ID! }`;
+    const r = await detectGraphqlChanges({ file: FILE, beforeText: before, afterText: after });
+    const enumRemoves = r.filter((e) => e.kind === 'graphql.remove_enum_value');
+    assert.equal(enumRemoves.length, 3);
+    assert.deepEqual(new Set(enumRemoves.map((e) => e.subObjectName)), new Set(['RED', 'BLUE', 'GREEN']));
+  });
 });

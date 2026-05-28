@@ -122,7 +122,10 @@ export type PolicyIssueCode =
   | 'drop_column_without_deprecation'
   | 'rls_weakening_without_security_review'
   | 'destructive_without_expand_contract'
-  | 'paired_with_missing';
+  | 'paired_with_missing'
+  // Bugbot MEDIUM fix — distinct code for manifest shape errors so
+  // monitoring / alerting doesn't miscategorize them as policy issues.
+  | 'manifest_shape_invalid';
 
 export interface PolicyIssue {
   severity: 'block' | 'warn';
