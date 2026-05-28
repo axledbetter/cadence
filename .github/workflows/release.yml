@@ -1,0 +1,127 @@
+name: Release
+
+# Changesets-driven release pipeline.
+#
+# After this lands, the release flow is:
+#   1. Land feature PRs (each with a `.changeset/*.md` file describing
+#      the user-visible change).
+#   2. Merge the auto-opened "Version Packages" PR. That triggers this
+#      workflow, which: bumps package.json, regenerates the lockfile,
+#      rewrites CHANGELOG.md, tags v$VERSION, publishes to npm, and
+#      creates a GitHub Release.
+#
+# Spec: docs/superpowers/specs/2026-05-27-changesets-release-automation-design.md
+# Plan: docs/superpowers/plans/2026-05-27-changesets-release-automation.md
+
+on:
+  push:
+    branches: [master]
+
+# Codex CRITICAL (#233 pass 1): two quick master merges could race the
+# Version Packages PR update or, worse, mid-publish. cancel-in-progress
+# is false because aborting a half-done npm publish leaves the registry
+# + git tag + GH Release out of sync.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write       # create the Version Packages PR + push v* tag
+  pull-requests: write  # open/update the Version Packages PR
+  id-token: write       # OIDC for npm trusted publishing (lands w/ track 1)
+
+jobs:
+  release:
+    name: Changesets release
+    runs-on: ubuntu-latest
+    # Gated environment — npm trusted-publisher policy on npmjs.com binds
+    # the OIDC identity to this exact environment name. Until the trust
+    # policy is configured (see RELEASING.md), `npm publish` here will
+    # fail with the misleading `npm 404` that actually means auth-failed.
+    environment: npm-publish
+    steps:
+      # 1. Mint a GitHub App installation token BEFORE checkout so the
+      #    repo's credential helper uses the app token (not the default
+      #    GITHUB_TOKEN). Required because:
+      #    - PRs/tag-pushes authored by the default GITHUB_TOKEN do NOT
+      #      trigger downstream workflows (GitHub anti-recursion).
+      #    - scripts/release-publish.sh does `git push origin v$VERSION`;
+      #      it inherits whatever token actions/checkout persisted.
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CADENCE_BOT_APP_ID }}
+          private-key: ${{ secrets.CADENCE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing requires npm CLI >= 11.5. Node 22's bundled
+      # npm may be older; pin explicitly so OIDC isn't silently skipped.
+      - name: Pin npm to a trusted-publishing-capable version
+        run: |
+          npm install -g npm@^11.5.0
+          NPM_MAJOR=$(node -e "console.log(process.versions.npm.split('.').map(Number)[0])")
+          if [ "$NPM_MAJOR" -lt 11 ]; then
+            echo "npm $(npm --version) is too old for trusted publishing (need >=11.5.0)"
+            exit 1
+          fi
+          npm --version
+
+      # --ignore-scripts (codex WARNING fix #233): the credential
+      # helper now carries an app-write token; we don't want random
+      # postinstall scripts to be able to read it from git config.
+      # Release builds don't need any postinstall lifecycle hooks (the
+      # built artifacts in dist/ are what gets published).
+      - run: npm ci --ignore-scripts
+
+      # Required for `git tag -a` and any commits changesets-action
+      # creates on the Version Packages PR branch.
+      - name: Configure git identity
+        env:
+          APP_ID: ${{ secrets.CADENCE_BOT_APP_ID }}
+        run: |
+          git config user.name "cadence-bot[bot]"
+          git config user.email "${APP_ID}+cadence-bot[bot]@users.noreply.github.com"
+
+      # The action does double duty:
+      #   - If there are unmerged .changeset/*.md files: opens or
+      #     updates the "Version Packages" PR.
+      #   - If there are NONE but the package.json version > latest on
+      #     npm: invokes the publish: script (which we extracted to
+      #     scripts/release-publish.sh per codex CRITICAL — keeping
+      #     non-trivial bash inline in the `publish:` input is unsafe
+      #     because the action's command-execution behavior is
+      #     simple-shell, not full bash semantics).
+      - name: Changesets — open Version PR or publish
+        uses: changesets/action@v1
+        with:
+          version: npx changeset version && npm install --package-lock-only --ignore-scripts
+          publish: bash scripts/release-publish.sh
+          createGithubReleases: false   # the script handles release creation
+          commit: "chore(release): version packages"
+          title: "chore(release): version packages"
+        env:
+          # The app token is what makes downstream CI trigger on the
+          # auto-PR AND what `gh release create` (inside the script)
+          # authenticates with.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # GITHUB_REPOSITORY is provided automatically by GitHub
+          # Actions; the script reads it for the `gh release` --repo
+          # flag.
+          #
+          # NPM auth: trusted publishing (OIDC) — no NODE_AUTH_TOKEN.
+          # The `permissions.id-token: write` above + `environment:
+          # npm-publish` on this job let npm CLI exchange the GitHub
+          # OIDC token for an npm publish credential at the registry.
+          # Requires the trusted-publisher policy on npmjs.com — see
+          # RELEASING.md for the one-time setup.

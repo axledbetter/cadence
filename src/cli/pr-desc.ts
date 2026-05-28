@@ -2,6 +2,9 @@ import type { Finding } from '../core/findings/types.ts';
 import * as fs from 'node:fs';
 import { execSync, spawnSync } from 'node:child_process';
 import { appendCostLog } from '../core/persist/cost-log.ts';
+import { injectIntoPrBody, SCHEMA_CHANGES_MARKER } from '../core/schema-changes/pr-template.ts';
+import { validateSchemaChanges, type SchemaChangeEntry } from '../core/schema-changes/types.ts';
+import { findLatestImplementArtifact } from '../core/schema-changes/artifact-resolver.ts';
 
 export interface PrDescOptions {
   base?: string;
@@ -125,7 +128,13 @@ export async function runPrDesc(options: PrDescOptions): Promise<PrDescResult> {
   const firstSummaryLine = rawOutput.split('\n')
     .map(l => l.trim())
     .find(l => /^[-*•]\s/.test(l));
-  const { title, body } = parseDescription(rawOutput, { branchName, firstSummaryLine });
+  const { title, body: rawBody } = parseDescription(rawOutput, { branchName, firstSummaryLine });
+
+  // v8.6 — inject schema-changes manifest if the implement-phase artifact
+  // exists. Idempotent: if the body already has the rendered block, it gets
+  // replaced. If no artifact, the marker (if present in the model output) is
+  // stripped to an empty block.
+  const body = injectSchemaChangesIfPresent(rawBody, options._cwd ?? process.cwd());
 
   const formatted = `Title: ${title}\n\n---\n${body}`;
 
@@ -247,4 +256,43 @@ async function createPr(title: string, body: string, yes: boolean): Promise<PrDe
   const prUrl = result.stdout.trim();
   process.stdout.write(`\nPR created: ${prUrl}\n`);
   return { title, body, prUrl };
+}
+
+
+// ---------------------------------------------------------------------------
+// v8.6 — schema-change manifest injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads the latest implement-phase artifact (via shared
+ * `findLatestImplementArtifact()` — same resolver `validate` uses, codex
+ * CRITICAL fix) and renders `schemaChanges` into the PR body via
+ * `injectIntoPrBody()`.
+ *
+ * Codex WARNING fix — behavior contract:
+ *   1. No artifact AND body has no marker → return body unchanged (back-compat).
+ *   2. No artifact AND body HAS marker → replace marker with empty manifest block.
+ *   3. Artifact has no `schemaChanges` → same as (1)/(2).
+ *   4. Artifact has invalid `schemaChanges` → strip marker (don't let bad data leak into PR).
+ *   5. Artifact has valid `schemaChanges` → render table.
+ */
+function injectSchemaChangesIfPresent(body: string, cwd: string): string {
+  const hasMarker = body.includes(SCHEMA_CHANGES_MARKER);
+  let entries: SchemaChangeEntry[] | null = null;
+  try {
+    const artifact = findLatestImplementArtifact(cwd);
+    if (artifact) {
+      const raw = JSON.parse(fs.readFileSync(artifact.artifactPath, 'utf8')) as { schemaChanges?: unknown };
+      if (raw.schemaChanges) {
+        const v = validateSchemaChanges(raw.schemaChanges);
+        if (v.ok) entries = v.value;
+      }
+    }
+  } catch {
+    // Continue with entries === null (renders an empty manifest if marker present).
+  }
+  if (entries === null) {
+    return hasMarker ? injectIntoPrBody(body, []) : body;
+  }
+  return injectIntoPrBody(body, entries);
 }

@@ -111,6 +111,32 @@
         "council":       { "$ref": "#/$defs/phaseRoute" },
         "bugbot_triage": { "$ref": "#/$defs/phaseRoute" }
       }
+    },
+    "schemaPaths": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "description": "v8.6 schema-change manifest opt-in gate. Globs of files whose changes require a typed schemaChanges[] manifest entry on the implement-phase output. Empty array (default) disables enforcement — existing profiles see no change. Example: ['data/deltas/*.sql', '**/*.proto', '**/*.graphql', 'app/types/public/**/*.ts'].",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "schemaConsumers": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "description": "Downstream dependents notified about schema changes. Free-form identifiers (e.g. 'org/repo', 'service:carrier-portal-automation'). Surfaced in the PR-body schema-changes block. Cross-repo PR creation against consumers is a v8.7 follow-up.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "schemaChangePolicy": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": false,
+      "description": "v8.6 policy gates evaluated by the validate phase. All booleans default true — once a profile opts in via non-empty schemaPaths, safety policies are ON by default. Override to false explicitly to disable a specific rule.",
+      "properties": {
+        "destructiveRequiresExpandContract": { "type": "boolean", "default": true, "description": "Block destructive schema changes (DROP, DELETE, RLS weakening) that don't carry an expandContract plan." },
+        "blockNotNullWithoutBackfill":       { "type": "boolean", "default": true, "description": "Block SET NOT NULL / NOT NULL ADD COLUMN without policyEvidence.backfillSql." },
+        "blockDropColumnWithoutDeprecation": { "type": "boolean", "default": true, "description": "Block DROP COLUMN without policyEvidence.deprecation.introducedIn." },
+        "blockRlsWeakeningWithoutSecurityReview": { "type": "boolean", "default": true, "description": "Block disable_rls / drop_policy / revoke without policyEvidence.securityReview.reviewer." }
+      }
     }
   },
   "$defs": {

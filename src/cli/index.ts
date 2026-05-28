@@ -1905,6 +1905,35 @@ switch (subcommand) {
     break;
   }
 
+  case 'schema': {
+    // v8.6 — schema-change manifest helpers.
+    //   cadence schema scan [--base <ref>] [--format json|yaml] [--out <path>] [--paths <glob,glob>]
+    const sub = args[1];
+    if (sub !== 'scan') {
+      console.error('Usage: cadence schema scan [--base <ref>] [--format json|yaml] [--out <path>] [--paths <glob,glob>]');
+      process.exit(1);
+      break;
+    }
+    const baseRef = flag('base');
+    const formatRaw = flag('format');
+    const outputPath = flag('out');
+    const pathsCsv = flag('paths');
+    const format: 'json' | 'yaml' = formatRaw === 'json' ? 'json' : 'yaml';
+    const { runSchemaScan } = await import('./schema-scan.ts');
+    const opts: Parameters<typeof runSchemaScan>[0] = {
+      cwd: process.cwd(),
+      format,
+    };
+    if (baseRef) opts.baseRef = baseRef;
+    if (outputPath) opts.outputPath = outputPath;
+    if (pathsCsv) opts.schemaPaths = pathsCsv.split(',').map((s) => s.trim()).filter(Boolean);
+    const result = await runSchemaScan(opts);
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    process.exit(result.exit);
+    break;
+  }
+
   default:
     console.error(`\x1b[31m[claude-autopilot] Unknown subcommand: "${subcommand}"\x1b[0m`);
     printUsage();

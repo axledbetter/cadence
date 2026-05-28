@@ -3,7 +3,8 @@
   "version": "8.5.0",
   "type": "module",
   "publishConfig": {
-    "tag": "latest"
+    "tag": "latest",
+    "provenance": true
   },
   "description": "Cadence: the multi-model automated coding harness. Claude writes, Codex reviews, Cursor bugbot triages — role-split orchestration across 16+ providers (Anthropic, OpenAI, Google, Groq, Ollama, Bedrock, Azure, Cohere, Mistral, plus OpenAI-compatible). Risk-tiered review depth, concurrent multi-PR dispatch. Brainstorm → spec → plan → implement → migrate → validate → PR → review → merge. MIT, local-first, distributed via Claude Code skill. (Formerly @delegance/claude-autopilot.)",
   "keywords": [
@@ -115,9 +116,14 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.97.0",
     "cohere-ai": "^7.15.0",
+    "libpg-query": "^18.0.1",
+    "graphql": "^16.10.0",
+    "protobufjs": "^7.4.0",
     "openai": ">=4"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
     "@types/js-yaml": "^4",
     "@types/node": "^25",
     "@types/proper-lockfile": "^4.1.4",

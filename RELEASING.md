@@ -1,129 +1,182 @@
 # Releasing Cadence
 
-This document covers two things:
+Cadence uses [Changesets](https://github.com/changesets/changesets) for
+version bumps, CHANGELOG generation, git tagging, npm publishing, and
+GitHub Release creation. The day-to-day release flow is two steps:
 
-1. **Cutting a release** — the normal flow (one of two modes, depending on whether the changesets PR has landed).
-2. **One-time setup for npm Trusted Publishing** — what the maintainer needs to configure on npmjs.com so the publish workflow can authenticate without `NPM_TOKEN`.
+1. Land feature PRs (each carrying a `.changeset/*.md` file).
+2. Merge the auto-opened "Version Packages" PR.
 
----
+That's it. The bot handles tag + publish + GitHub Release.
 
-## Cutting a release
+## Day-to-day: adding a changeset to your PR
 
-### Mode A — Changesets-driven (target state, after #232 lands)
-
-1. Every feature PR commits a `.changeset/*.md` declaring its bump type and a one-line summary. (`npx changeset` creates the file interactively.)
-2. After merging the feature PR to `master`, the `Release` workflow opens or updates a "Version Packages" PR that bumps `package.json`, rotates the CHANGELOG, and deletes the consumed changeset files.
-3. Review and merge the Version Packages PR. The post-merge workflow:
-   - Creates a `v$VERSION` git tag.
-   - Publishes to npm via OIDC (Trusted Publishing — see below).
-   - Creates a GitHub Release using the CHANGELOG entry as the body.
-
-That's it. No manual `git tag`, no manual `package.json` bump, no manual CHANGELOG edit.
-
-### Mode B — Manual (current state until #232 lands, and emergency fallback after)
+After making changes in your feature branch:
 
 ```bash
-# On master, after the feature PRs you want in this release have all merged:
-git checkout master && git pull
-# Bump package.json version (semver: patch / minor / major as appropriate).
-npm version <patch|minor|major> --no-git-tag-version
-# Update CHANGELOG.md: change "## Unreleased — vX.Y target" to "## vX.Y.Z — <date>",
-# add a new "## Unreleased" header at the top.
-# Commit:
-git add package.json package-lock.json CHANGELOG.md
-git commit -m "chore(vX.Y.Z): bump version"
-git push
-# Wait for CI green on master.
-# Tag + push (fires the publish workflow):
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
-git push origin vX.Y.Z
+npx changeset
 ```
 
-The publish workflow takes ~5 minutes. Once it completes, `npm view @delegance/cadence dist-tags` shows the new version on `latest` (or `next` for pre-releases).
+This walks you through:
 
----
+- **Bump type:** `patch` (bug fix), `minor` (new feature, no breaking
+  changes), or `major` (breaking change).
+- **Summary:** one or two sentences describing the user-visible change.
+  This text lands in CHANGELOG.md verbatim, so write it for the
+  reader of the release notes (not your future self reviewing the PR).
 
-## One-time setup: npm Trusted Publishing (OIDC)
+The CLI writes `.changeset/<funny-codename>.md`. Commit it alongside
+your feature change.
 
-We use [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) instead of long-lived `NPM_TOKEN` secrets. GitHub Actions authenticates to npm directly via the workflow's OIDC identity. Nothing to rotate, nothing to leak.
+If your PR only touches docs, tests, or CI (per the path filter in
+`.github/workflows/changeset-check.yml`), no changeset is required —
+the gate will skip itself.
 
-### Prerequisites
+## What the bot does
 
-- You're an owner of `@delegance/cadence` on npmjs.com (run `npm access list collaborators @delegance/cadence` to confirm).
-- You can administer the cadence GitHub repo (Settings → Environments + Actions).
+The `Release` workflow (`.github/workflows/release.yml`) runs on every
+push to `master`:
 
-### Step 1: Create the GitHub environment
+- **If there are unmerged `.changeset/*.md` files** — opens or updates
+  a PR titled "chore(release): version packages" on the
+  `changeset-release/master` branch. That PR:
+  - bumps `package.json` to the cumulative target version
+  - regenerates `package-lock.json`
+  - rewrites the CHANGELOG.md header for the new version
+  - deletes the consumed `.changeset/*.md` files
 
-1. GitHub → cadence repo → **Settings** → **Environments** → **New environment**.
+  Review it like any other PR. Merge when ready.
+
+- **If there are NO unmerged changesets** but `package.json` version is
+  greater than what's on npm — runs the publish path:
+  - `npx changeset publish` → `npm publish --access public`
+  - `git tag -a v$VERSION -m "Release v$VERSION"` (matches our v*
+    discipline; changesets' default `pkg@version` is overridden)
+  - `git push origin v$VERSION`
+  - `gh release create v$VERSION` with the new CHANGELOG section as
+    body
+
+So merging the Version Packages PR triggers the next master push,
+which then triggers the publish. Two clicks per release.
+
+## Emergency manual release
+
+After the changesets migration, a manual `git tag -a vX.Y.Z && git push
+origin vX.Y.Z` no longer publishes to npm — the tag-triggered
+publish job in `.github/workflows/ci.yml` was deleted. The supported
+emergency path is:
+
+1. Bump `package.json` version on master (commit directly or via PR).
+2. From a maintainer workstation:
+   ```bash
+   npm whoami                        # confirm auth
+   npm publish --access public       # use --tag next for pre-releases
+   ```
+3. `git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin vX.Y.Z`
+   (for the record).
+4. `gh release create vX.Y.Z --generate-notes` for the GitHub Release.
+
+This is intentionally inconvenient — the changesets flow is the paved
+path.
+
+## One-time setup (for the repo maintainer)
+
+The release workflow uses a GitHub App token instead of the default
+`GITHUB_TOKEN`. Reason: PRs and tag pushes authored by `GITHUB_TOKEN`
+do NOT trigger downstream workflows (GitHub's anti-recursion
+safeguard). The auto-opened Version Packages PR would not get its own
+CI run, and tag pushes wouldn't fire any tag-based automation.
+
+### 1. Create a GitHub App on the cadence repo
+
+1. Go to https://github.com/settings/apps/new (or organization
+   settings if cadence is in an org).
+2. Name: `cadence-bot` (or any name — surfaced as the PR author).
+3. Homepage URL: `https://github.com/axledbetter/cadence`.
+4. Disable webhooks (uncheck "Active" under Webhook).
+5. **Permissions (least-privilege per codex security review):**
+   - Repository → Contents: **Read & write** (push tags, push to the
+     Version Packages PR branch)
+   - Repository → Pull requests: **Read & write** (open/update the
+     Version Packages PR)
+   - Repository → Metadata: **Read** (auto-granted)
+   - Do NOT grant `Workflows: write` unless you specifically want the
+     bot to be able to modify `.github/workflows/*.yml` files. Our
+     release flow doesn't need it.
+6. **Where can this app be installed?** Only on this account.
+7. Click "Create GitHub App". Note the **App ID** displayed at the top
+   of the next page.
+8. Scroll down, click **Generate a private key**. A `.pem` file
+   downloads. Keep it safe — you'll paste it into a repo secret.
+9. In the app's settings, click **Install App** → install on
+   `axledbetter/cadence` only.
+
+### 2. Add two repository secrets
+
+Settings → Secrets and variables → Actions → New repository secret:
+
+- `CADENCE_BOT_APP_ID` — the App ID number from step 7 above.
+- `CADENCE_BOT_PRIVATE_KEY` — paste the entire contents of the `.pem`
+  file, including the `-----BEGIN RSA PRIVATE KEY-----` and
+  `-----END RSA PRIVATE KEY-----` lines.
+
+### 3. npm Trusted Publishing (OIDC) — replaces `NPM_TOKEN`
+
+The release workflow authenticates to npm via [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) — GitHub Actions' OIDC identity is verified directly by npm, no shared secret. You need to configure the trust policy once per package.
+
+#### 3a. Create the `npm-publish` GitHub environment
+
+1. cadence repo → **Settings** → **Environments** → **New environment**.
 2. Name: **`npm-publish`** (exact casing — npm's policy matches it literally).
-3. Optional: add `Required reviewers` later if you want a human gate on publishes. For now, leave protection rules empty.
+3. Optional: add `Required reviewers` later if you want a human gate on every publish. For now, leave protection rules empty.
 
-### Step 2: Configure the npm trusted-publisher policy
+#### 3b. Configure the npm trusted-publisher policy
 
 1. npmjs.com → **@delegance/cadence** package page → **Settings** → **Trusted Publishers** → **Add**.
 2. Fields:
    - Publisher: **GitHub Actions**
    - Organization or user: **`axledbetter`**
    - Repository: **`cadence`**
-   - Workflow filename: **`.github/workflows/ci.yml`** (exact path, no leading slash)
-   - Environment name: **`npm-publish`** (must match step 1 casing)
+   - Workflow filename: **`.github/workflows/release.yml`** (exact path, no leading slash)
+   - Environment name: **`npm-publish`** (must match step 3a casing)
 3. Save.
 
-### Step 3: Cut a test release
+#### 3c. First publish
 
-```bash
-# In the cadence repo, bump to v8.5.1 (or any unused patch version):
-# ... follow Mode A or Mode B above ...
-git tag -a v8.5.1 -m "v8.5.1 — first OIDC publish"
-git push origin v8.5.1
-```
+Cut a patch release through the normal changesets flow (or via the emergency manual path). The release workflow will publish via OIDC. Verify two ways:
 
-The publish workflow should succeed. Two ways to verify:
-
-1. `npm view @delegance/cadence@8.5.1 --json | jq '.dist'` — confirms the version landed.
+1. `npm view @delegance/cadence@<new-version> --json | jq '.dist'` — confirms publish succeeded.
 2. The package's npmjs.com page now shows a **Provenance** badge linking back to the cadence commit + workflow run.
 
-### Step 4: Decommission `NPM_TOKEN`
+#### 3d. Decommission `NPM_TOKEN`
 
-After a successful OIDC publish:
+After a successful OIDC publish, kill the long-lived token:
 
-1. GitHub → cadence repo → **Settings** → **Secrets and variables** → **Actions** → delete the **`NPM_TOKEN`** repository secret.
-2. Also check **Environment secrets** under each environment and **Organization secrets** at the org level — kill any `NPM_TOKEN` there too.
-3. npmjs.com → your profile → **Access Tokens** → revoke any granular or classic tokens scoped to `@delegance/*`.
+1. cadence repo → Settings → Secrets and variables → Actions → delete `NPM_TOKEN` (repo secret, environment secrets, and check org-level secrets too).
+2. npmjs.com → your profile → Access Tokens → revoke any granular or classic tokens scoped to `@delegance/*`.
 
 You can now never accidentally rotate the wrong token, leak it in a log, or fail a publish because it expired.
 
----
-
-## Other delegance packages
-
-The same setup applies to:
-
-- `@delegance/claude-autopilot` (deprecated tombstone — still receives the redirect publish)
-- `@delegance/guardrail`
-- `@delegance/sdk`
-
-Each requires its own trusted-publisher policy on npmjs.com, bound to whichever repo + workflow + environment publishes it. Audit which repo currently publishes each one (`gh api /repos/<owner>/<repo>/actions/workflows | jq '.workflows[].path'`) before configuring.
-
----
-
 ## Troubleshooting
 
-### "Cannot find tag matching package.json version"
+- **Version Packages PR doesn't open.** Check the `Release` workflow
+  logs on the latest master push. Most common cause: app token
+  permissions missing — re-grant the GitHub App.
 
-The `Validate tag matches package version` step compares `vX.Y.Z` to `package.json:version`. If they disagree, the publish fails. Either the tag was pushed against the wrong commit (use `git ls-remote --tags origin` to inspect) or the version bump didn't land before the tag. Fix by re-tagging on the right commit.
+- **PR opens but downstream CI doesn't run on it.** App token isn't
+  being used by `actions/checkout`. Verify `token: ${{
+  steps.app-token.outputs.token }}` is set in the checkout step.
 
-### "npm error 404 PUT https://registry.npmjs.org/@delegance%2fcadence — Not found"
+- **`changeset status --since=origin/master` fails with "fatal: bad
+  revision".** The PR checkout didn't fetch master. Verify
+  `fetch-depth: 0` is set and `git fetch origin master` ran.
 
-npm's misleading way of saying **auth failed**. With OIDC, this means either:
+- **Publish step fails with `npm error 404 PUT https://registry.npmjs.org/@delegance%2fcadence`.** This is npm's misleading way of saying **auth failed**. With OIDC, this means one of: the trusted-publisher policy isn't configured (or has a typo in owner / repo / workflow filename / environment); the `id-token: write` permission is missing from `release.yml`; the `environment: npm-publish` line is missing from the `release` job; or you haven't bumped the package version (npm returns 404 if you try to re-publish an existing version). Re-walk §3a–3b above against the actual workflow file.
 
-- The trusted-publisher policy isn't configured (or has a typo in owner/repo/workflow/environment).
-- The workflow is running on a ref that the policy doesn't allow.
-- The `id-token: write` permission is missing.
-- The `environment: npm-publish` line is missing from the publish job.
+- **`npm too old for trusted publishing`.** The workflow pins npm to `^11.5.0`. If the pinned install itself fails (network blip, registry hiccup), the publish bails fast with a clear message. Re-run the workflow.
 
-Check the publish job log for the line starting with `npm notice publishing to`. If it says `with auth: ...`, the auth worked; the failure is elsewhere. If it just dies with 404, auth failed.
-
-### "npm too old for trusted publishing"
-
-The workflow pins npm to `^11.5.0`. If the pinned install itself fails (network issue, registry hiccup), the publish bails fast with a clear message. Re-run the workflow.
+- **Tag pushed but no GitHub Release.** The `gh release create` step
+  in `release.yml` failed (check logs). Most common cause: `gh` not
+  authenticated — the `GITHUB_TOKEN` env var should be the app token.
+  Re-run the publish step manually if the tag is good but the release
+  is missing.
