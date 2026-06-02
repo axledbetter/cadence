@@ -121,7 +121,7 @@
     "libpg-query": "^18.0.1",
     "graphql": "^16.10.0",
     "protobufjs": "^7.4.0",
-    "openai": ">=4"
+    "openai": ">=6"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",
